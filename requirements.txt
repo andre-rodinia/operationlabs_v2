@@ -1,0 +1,23 @@
+# Manufacturing OEE Analytics v2.0
+# Simplified dependencies for redesigned application
+
+# Core Framework
+streamlit>=1.32.0
+
+# Data Processing
+pandas>=2.2.0
+
+# Database
+psycopg2-binary>=2.9.9
+
+# Configuration
+python-dotenv>=1.0.1
+
+# Timezone Handling
+pytz>=2024.1
+
+# Visualizations
+plotly>=5.18.0
+
+# Testing (Development)
+pytest>=7.4.3
