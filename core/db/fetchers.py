@@ -208,73 +208,130 @@ def fetch_cut_data_by_jobs(
         return pd.DataFrame()
 
 
-def fetch_pick_data_by_jobs(
-    job_ids: List[str],
-    time_window: Optional[CellTimeWindow] = None
+def fetch_pick_data_by_batch(
+    batch_ids: List[str],
+    time_window: CellTimeWindow
 ) -> pd.DataFrame:
     """
-    Fetch Pick/Robot data for specific job IDs with component-level details.
+    Fetch Pick/Robot data by batch using simplified approach.
     
-    Optionally filters by time window after fetching.
+    This function:
+    1. Gets components and pick status from INSIDE database (production_componentorder + production_componentorderevent)
+    2. Gets uptime/downtime from equipment table (historian) filtered by time window
+    3. Combines them into a single DataFrame
 
     Args:
-        job_ids: List of job IDs from print data
-        time_window: Optional CellTimeWindow to filter results
+        batch_ids: List of batch IDs (can be 'B955' or '955' format)
+        time_window: CellTimeWindow with segments (required) - used to filter equipment state changes
 
     Returns:
-        DataFrame with Pick data including component counts and availability
+        DataFrame with Pick data including component-level pick status and availability
+
+    Raises:
+        ValueError: If time_window is None or has no segments
     """
     try:
-        if not job_ids or len(job_ids) == 0:
-            logger.warning("No job IDs provided for Pick data query")
+        if not batch_ids or len(batch_ids) == 0:
+            logger.warning("No batch IDs provided for Pick data query")
             return pd.DataFrame()
 
+        if not time_window or not time_window.segments:
+            raise ValueError(
+                "Time window with segments is required for Pick data query. "
+                "Time segments are used to filter equipment state changes for accurate uptime/downtime calculation."
+            )
+
+        # Step 1: Get components and pick status from INSIDE database
+        with get_inside_connection() as conn:
+            cursor = conn.cursor()
+            query, parameters = secure_query_builder.build_pick_data_by_batch_query(batch_ids)
+            logger.info(f"Fetching Pick components and status for {len(batch_ids)} batches")
+            cursor.execute(query, parameters)
+            component_results = cursor.fetchall()
+            
+            if not component_results:
+                logger.warning(f"No components found for batches: {batch_ids}")
+                return pd.DataFrame()
+            
+            columns = [desc[0] for desc in cursor.description]
+            component_df = pd.DataFrame(component_results, columns=columns)
+            logger.info(f"Found {len(component_df)} components with pick status")
+
+        # Step 2: Get uptime/downtime from equipment table (historian)
         with get_historian_connection() as conn:
             cursor = conn.cursor()
+            
+            # Build time window conditions for equipment state filtering
+            segment_conditions = []
+            time_window_params = []
+            for segment in time_window.segments:
+                segment_conditions.append("(e.ts > %s AND e.ts < %s)")
+                time_window_params.append(segment.start.isoformat())
+                time_window_params.append(segment.end.isoformat())
+            
+            time_window_conditions = " AND (" + " OR ".join(segment_conditions) + ")"
+            
+            equipment_query = f"""
+                WITH state_changes AS (
+                    SELECT
+                        e.ts,
+                        e.cell,
+                        e.state,
+                        LEAD(e.state) OVER (PARTITION BY e.cell ORDER BY e.ts) AS next_state,
+                        LEAD(e.ts) OVER (PARTITION BY e.cell ORDER BY e.ts) AS next_ts
+                    FROM equipment e
+                    WHERE e.cell = 'Pick1'
+                    {time_window_conditions}
+                ),
+                running_duration AS (
+                    SELECT
+                        SUM(EXTRACT(EPOCH FROM (next_ts - ts))) AS running_duration_seconds
+                    FROM state_changes
+                    WHERE state = 'running' 
+                    AND next_state IN ('idle', 'down')
+                    AND ts IS NOT NULL 
+                    AND next_ts IS NOT NULL
+                ),
+                downtime_duration AS (
+                    SELECT
+                        SUM(EXTRACT(EPOCH FROM (next_ts - ts))) AS downtime_duration_seconds
+                    FROM state_changes
+                    WHERE state = 'down'
+                    AND next_state IN ('idle', 'running')
+                    AND ts IS NOT NULL 
+                    AND next_ts IS NOT NULL
+                )
+                SELECT
+                    COALESCE((SELECT running_duration_seconds FROM running_duration), 0.0) / 60.0 AS "uptime (min)",
+                    COALESCE((SELECT downtime_duration_seconds FROM downtime_duration), 0.0) / 60.0 AS "downtime (min)"
+            """
+            
+            cursor.execute(equipment_query, time_window_params)
+            equipment_results = cursor.fetchone()
+            
+            if equipment_results:
+                uptime_min = float(equipment_results[0]) if equipment_results[0] is not None else 0.0
+                downtime_min = float(equipment_results[1]) if equipment_results[1] is not None else 0.0
+                logger.info(f"Pick uptime/downtime: {uptime_min:.2f} min / {downtime_min:.2f} min")
+            else:
+                uptime_min = 0.0
+                downtime_min = 0.0
+                logger.warning("No equipment state data found for Pick cell")
 
-            # Build secure parameterized query
-            query, parameters = secure_query_builder.build_pick_data_by_job_query(job_ids)
-
-            logger.info(f"Fetching Pick data for {len(job_ids)} jobs")
-
-            # Execute query
-            cursor.execute(query, parameters)
-            results = cursor.fetchall()
-
-            if not results:
-                logger.info(f"No Pick data found for {len(job_ids)} jobs")
-                return pd.DataFrame()
-
-            # Get column names
-            columns = [desc[0] for desc in cursor.description]
-
-            # Create DataFrame
-            df = pd.DataFrame(results, columns=columns)
-
-            # Convert timing columns to datetime if present
-            if 'job_start' in df.columns:
-                df['job_start'] = pd.to_datetime(df['job_start'], errors='coerce')
-            if 'job_end' in df.columns:
-                df['job_end'] = pd.to_datetime(df['job_end'], errors='coerce')
-
-            # Apply time window filter if provided
-            if time_window is not None:
-                # Use ts column for filtering (timestamp of the job report)
-                if 'ts' in df.columns:
-                    original_count = len(df)
-                    df = filter_dataframe_by_time_window(df, time_window, timestamp_column='ts')
-                    logger.info(
-                        f"Time window filter: {original_count} → {len(df)} rows "
-                        f"({len(df)/original_count*100:.1f}% coverage)"
-                    )
-                else:
-                    logger.warning("Cannot apply time window filter: 'ts' column not found")
-
-            logger.info(f"Retrieved {len(df)} Pick records for {len(job_ids)} jobs")
-            return df
+        # Step 3: Combine component data with uptime/downtime
+        component_df['uptime (min)'] = uptime_min
+        component_df['downtime (min)'] = downtime_min
+        component_df['cell'] = 'Pick1'
+        
+        # Calculate successful_picks and total_picks for aggregation
+        component_df['successful_picks'] = (component_df['pick_status'] == 'successful').astype(int)
+        component_df['total_picks'] = (component_df['pick_status'].isin(['successful', 'failed'])).astype(int)
+        
+        logger.info(f"Retrieved {len(component_df)} Pick records for {len(batch_ids)} batches")
+        return component_df
 
     except Exception as e:
-        logger.error(f"Error fetching Pick data by jobs: {e}", exc_info=True)
+        logger.error(f"Error fetching Pick data by batch: {e}", exc_info=True)
         return pd.DataFrame()
 
 

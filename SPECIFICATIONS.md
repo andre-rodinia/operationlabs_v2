@@ -30,13 +30,13 @@ Redesign the manufacturing analytics platform to provide **clear, actionable OEE
 1. **Simplicity over complexity** - Remove redundant calculation layers
 2. **Per-cell focus** - Each cell has distinct OEE formula based on its operational characteristics
 3. **Flexible time tracking** - Support batch operations spanning multiple days/shifts
-4. **Bottleneck visibility** - Immediately identify which cell limits throughput
+4. **System-level OEE** - Calculate overall system effectiveness as product of cell OEEs
 5. **Quality separation** - Overall quality tracked separately from cell-level OEE
 
 ### Success Metrics
 - Reduce codebase from ~10,000 lines to ~3,000 lines
 - Single source of truth for OEE calculations
-- Real-time bottleneck identification without overall quality dependency
+- System OEE calculation as product of individual cell OEEs
 - Support multi-day batch tracking with time segments
 
 ---
@@ -65,10 +65,12 @@ Redesign the manufacturing analytics platform to provide **clear, actionable OEE
 - **Operational Quality Accuracy (Q_acc%)**: Pick Success Rate
 - **OEE = A × 100% × Q_acc%**
 
-#### 2. Bottleneck Identification
-- Calculate `min(OEE_print, OEE_cut, OEE_pick)`
-- Highlight which cell is the limiting factor
-- **Exclude overall quality** (QC data from production_componentorder) from bottleneck calculation
+#### 2. System OEE Calculation
+- Calculate overall system OEE as the product of individual cell OEEs
+- **Formula:** `OEE_system = OEE_printer × OEE_cut × OEE_pick`
+- This multiplicative approach reflects that all cells must perform well for the system to achieve high overall effectiveness
+- Each cell's performance directly impacts the final output
+- **Exclude overall quality** (QC data from production_componentorder) from system OEE calculation
 - Rationale: Time offset between production and quality inspection
 
 #### 3. Time Window Management
@@ -263,34 +265,27 @@ def calculate_cell_oee(cell_type: str, uptime: float, downtime: float,
     }
 ```
 
-#### Bottleneck Identifier
+#### System OEE Calculator
 ```python
-def identify_bottleneck(printer_oee: float, cut_oee: float,
-                       pick_oee: float) -> dict:
+def calculate_system_oee(printer_oee: float, cut_oee: float,
+                         pick_oee: float) -> float:
     """
-    Identify which cell is the production bottleneck.
+    Calculate overall system OEE as the product of individual cell OEEs.
+
+    Args:
+        printer_oee: OEE value for printer cell (0.0-1.0)
+        cut_oee: OEE value for cut cell (0.0-1.0)
+        pick_oee: OEE value for pick cell (0.0-1.0)
 
     Returns:
-        {
-            'bottleneck_cell': str,  # 'printer', 'cut', or 'pick'
-            'bottleneck_oee': float, # Minimum OEE value
-            'limiting_factor': str   # Description of limitation
-        }
+        System OEE value (0.0-1.0)
+
+    Example:
+        >>> system_oee = calculate_system_oee(0.901, 0.846, 0.901)
+        >>> print(f"System OEE: {system_oee:.1%}")
+        'System OEE: 68.7%'
     """
-    oee_values = {
-        'printer': printer_oee,
-        'cut': cut_oee,
-        'pick': pick_oee
-    }
-
-    bottleneck_cell = min(oee_values, key=oee_values.get)
-    bottleneck_oee = oee_values[bottleneck_cell]
-
-    return {
-        'bottleneck_cell': bottleneck_cell,
-        'bottleneck_oee': bottleneck_oee,
-        'limiting_factor': f"{bottleneck_cell.capitalize()} is limiting throughput at {bottleneck_oee:.1%} OEE"
-    }
+    return printer_oee * cut_oee * pick_oee
 ```
 
 ### Metric Extraction
@@ -506,7 +501,7 @@ keen-tesla-v2/
 ```python
 # Single file with ~200 lines
 - calculate_cell_oee()
-- identify_bottleneck()
+- calculate_system_oee()  # Product of individual cell OEEs
 - aggregate_batch_metrics()  # Simple sum of uptime/downtime across jobs
 ```
 
@@ -537,9 +532,9 @@ keen-tesla-v2/
 
 #### `ui/metrics_display.py` (NEW)
 ```python
-# Display OEE metrics and bottleneck analysis
+# Display OEE metrics and system OEE
 - render_cell_metrics_card(cell_data)
-- render_bottleneck_summary(bottleneck_info)
+- render_system_oee_summary(system_oee, cell_oees)
 - render_timeline_chart(filtered_data)  # REUSE from visualizations.py
 ```
 
@@ -577,13 +572,16 @@ keen-tesla-v2/
 │  │ OEE: 71.3%       │ OEE: 95.0%       │ OEE: 82.7%           │ │
 │  └──────────────────┴──────────────────┴──────────────────────┘ │
 │                                                                   │
-│  🚨 Bottleneck Analysis                                          │
+│  📊 System OEE                                                    │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │ ⚠️  PRINTER is limiting throughput at 71.3% OEE            │  │
+│  │ System OEE: 56.0%                                          │  │
 │  │                                                             │  │
-│  │ Contributing factors:                                       │  │
-│  │ • Availability: 82% (18% downtime)                         │  │
-│  │ • Performance: 87% (13% below nominal speed)               │  │
+│  │ Calculation:                                                │  │
+│  │ 71.3% × 95.0% × 82.7% = 56.0%                              │  │
+│  │                                                             │  │
+│  │ This represents the overall effectiveness of the entire     │  │
+│  │ production system, where all cells must perform well for   │  │
+│  │ high system output.                                         │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                   │
 │  📈 Detailed Metrics                                             │
@@ -617,10 +615,11 @@ keen-tesla-v2/
   - Yellow: 70% ≤ OEE < 85%
   - Red: OEE < 70%
 
-#### 4. Bottleneck Summary
-- **Highlight limiting cell** with warning icon
-- **Show gap to target:** "23% below 85% target"
-- **Actionable insights:** Focus areas for improvement
+#### 4. System OEE Summary
+- **Display overall system OEE** with calculation breakdown
+- **Show individual cell contributions:** Each cell's OEE and its impact
+- **Visual indicator:** Color-coded based on system OEE value
+- **Actionable insights:** Identify which cells need improvement to boost system performance
 
 #### 5. Timeline Chart (REUSE)
 - Gantt-style chart showing job timing per cell
@@ -779,15 +778,15 @@ keen-tesla-v2/
 2. ✅ Implement OEE calculator:
    - `core/calculations/oee.py`
    - `calculate_cell_oee()` function
-   - `identify_bottleneck()` function
+   - `calculate_system_oee()` function
 3. ✅ Write comprehensive tests:
    - Test each cell type formula
-   - Test bottleneck identification
+   - Test system OEE calculation
    - Edge cases (zero uptime, 100% downtime)
 
 #### Deliverables:
 - Functional OEE calculations for all three cells
-- Bottleneck identification working
+- System OEE calculation working
 - Test coverage >90%
 
 ### Phase 3: User Interface (Week 3)
@@ -805,7 +804,7 @@ keen-tesla-v2/
 3. ✅ Create metrics display:
    - `ui/metrics_display.py`
    - Cell OEE cards
-   - Bottleneck summary
+   - System OEE summary
    - Timeline chart (reuse from `visualizations.py`)
 4. ✅ Build main app:
    - `app.py` (~800 lines)
@@ -823,7 +822,7 @@ keen-tesla-v2/
 #### Tasks:
 1. ✅ Implement CSV export:
    - Generate CSV files for OEE metrics
-   - Include bottleneck analysis
+   - Include system OEE calculation
    - Add quality metrics (separate from OEE)
 2. ✅ Add download buttons to UI:
    - Download OEE metrics as CSV
@@ -903,7 +902,7 @@ keen-tesla-v2/
 
 ### Functional Requirements
 - ✅ Calculate OEE for Printer (A×P×100%), Cut (A×100%×100%), Pick (A×100%×Q_acc)
-- ✅ Identify bottleneck cell without overall quality
+- ✅ Calculate system OEE as product of individual cell OEEs
 - ✅ Support per-cell time windows with multiple segments
 - ✅ Export data to CSV format
 - ✅ Display timeline charts and metrics cards
@@ -917,7 +916,7 @@ keen-tesla-v2/
 
 ### User Acceptance
 - ✅ Manufacturing team can track OEE without manual calculations
-- ✅ Bottleneck identification guides improvement efforts
+- ✅ System OEE calculation provides clear overall performance metric
 - ✅ Multi-day batch tracking works seamlessly
 - ✅ CSV export enables flexible data analysis
 
@@ -959,16 +958,16 @@ keen-tesla-v2/
      Pick: calculate_cell_oee('pick', uptime=310, downtime=50, quality=0.94)
      → {availability: 0.861, performance: 1.0, quality: 0.94, oee: 0.809}
 
-5. Bottleneck Identification:
-   identify_bottleneck(0.692, 0.933, 0.809)
-   → {bottleneck_cell: 'printer', bottleneck_oee: 0.692}
+5. System OEE Calculation:
+   calculate_system_oee(0.692, 0.933, 0.809)
+   → 0.692 × 0.933 × 0.809 = 0.511 (51.1%)
 
 6. Display:
    Render metrics cards with color coding (Printer=Red, Cut=Green, Pick=Yellow)
-   Show bottleneck alert: "⚠️ PRINTER is limiting throughput at 69.2% OEE"
+   Show system OEE summary: "System OEE: 51.1% (69.2% × 93.3% × 80.9%)"
 
 7. Export:
-   generate_csv(batch_metrics, bottleneck_data, quality_data)
+   generate_csv(batch_metrics, system_oee_data, quality_data)
    → Returns CSV file for download
 ```
 
@@ -1036,7 +1035,7 @@ CREATE INDEX idx_componentorder_qc_state ON production_componentorder(qc_state);
 | 1.0     | 2026-01-06 | System | Initial specification document   |
 | 2.0     | 2026-01-06 | System | Added time window requirements,  |
 |         |            |        | simplified OEE formulas,         |
-|         |            |        | bottleneck identification        |
+|         |            |        | system OEE calculation           |
 | 2.1     | 2026-01-06 | System | Removed Google Sheets integration,|
 |         |            |        | replaced with CSV export         |
 

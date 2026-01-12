@@ -683,6 +683,67 @@ class SecureQueryBuilder:
         logger.info(f"Built secure pick data by job query for {len(validated_jobs)} jobs")
         return query, parameters
 
+    def build_pick_data_by_batch_query(self, batch_ids: List[str]) -> Tuple[str, List[Any]]:
+        """
+        Build simplified query to fetch Pick data by batch from INSIDE database.
+        
+        This query:
+        1. Gets all components for the batch from production_componentorder
+        2. Matches component IDs with pick status from production_componentorderevent
+        3. Returns component-level data with pick status (successful/failed/not_picked)
+        
+        Note: Uptime/downtime is calculated separately from equipment table in the fetcher.
+
+        Args:
+            batch_ids: List of batch IDs (can be 'B955' or '955' format)
+
+        Returns:
+            Tuple[str, List[Any]]: (query_string, parameters)
+        """
+        # Validate batch IDs
+        validated_batches = []
+        for bid in batch_ids:
+            try:
+                clean_id = str(bid).replace('B', '').replace('b', '').strip()
+                validated_batches.append(int(clean_id))
+            except (ValueError, AttributeError, TypeError):
+                logger.warning(f"Invalid batch ID format: {bid}")
+                continue
+
+        if not validated_batches:
+            raise ValueError("No valid batch IDs provided")
+
+        # Simple query: Get components from INSIDE and match with pick status
+        query = """
+            SELECT
+                pc.id as component_id,
+                pc.production_batch_id,
+                pj.rg_id as job_id,
+                pj.id as print_job_id,
+                pc.created_at,
+                -- Pick status from production_componentorderevent
+                CASE 
+                    WHEN pick_event.state = 'passed' OR pick_event.state = 'successful' THEN 'successful'
+                    WHEN pick_event.state = 'failed' THEN 'failed'
+                    ELSE 'not_picked'
+                END as pick_status,
+                pick_event.state as pick_event_state,
+                pick_event.created_at as pick_event_time
+            FROM production_componentorder pc
+            JOIN production_printjob pj ON pc.print_job_id = pj.id
+            LEFT JOIN production_componentorderevent pick_event 
+                ON pick_event.component_order_id = pc.id 
+                AND pick_event.event_type = 'pick'
+            WHERE pc.production_batch_id = ANY(%s::bigint[])
+              AND pj.status != 'cancelled'
+            ORDER BY pc.id ASC
+        """
+        
+        logger.info(
+            f"Built simplified pick data by batch query for {len(validated_batches)} batches"
+        )
+        return query, [validated_batches]
+
     def build_print_data_by_time_query(self, start_time: str, end_time: str) -> Tuple[str, List[Any]]:
         """
         Build secure parameterized query for print data by time range.

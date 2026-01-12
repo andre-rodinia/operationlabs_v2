@@ -14,12 +14,14 @@ import io
 from typing import Optional
 from datetime import date
 
+logger = logging.getLogger(__name__)
+
 from utils.config import load_config, validate_config
 from core.db.fetchers import (
     fetch_print_data_by_batch,
     fetch_print_data_by_time_window,
     fetch_cut_data_by_jobs,
-    fetch_pick_data_by_jobs,
+    fetch_pick_data_by_batch,
     fetch_quality_metrics_by_batch,
     fetch_batch_quality_breakdown,
     fetch_batch_quality_breakdown_v2
@@ -227,16 +229,16 @@ if st.button("📊 Load Data & Calculate OEE", type="primary", use_container_wid
             
             # Fetch pick data if pick is enabled
             if 'pick' in enabled_cells:
-                if not job_ids and 'printer' not in enabled_cells:
-                    log_collector.add_warning("Pick cell requires job IDs. Enable Printer cell or provide job IDs.")
+                if not detected_batches:
+                    log_collector.add_warning("Pick cell requires batch IDs. Enable Printer cell to detect batches.")
                     pick_df = pd.DataFrame()
                 else:
                     log_collector.add_info("Fetching pick data...")
-                    if job_ids:
-                        pick_df = fetch_pick_data_by_jobs(job_ids, pick_window)
+                    if detected_batches:
+                        pick_df = fetch_pick_data_by_batch(detected_batches, pick_window)
                         log_collector.add_success(f"Loaded {len(pick_df)} pick records")
                     else:
-                        log_collector.add_warning("No job IDs available for pick data")
+                        log_collector.add_warning("No batch IDs available for pick data")
                         pick_df = pd.DataFrame()
             
             # Fetch quality metrics for detected batches
@@ -421,23 +423,43 @@ if has_data:
     
     # Calculate aggregated Pick OEE (all batches combined)
     if 'pick' in enabled_cells and not pick_df.empty:
-        pick_uptime = float(pick_df['uptime (min)'].sum()) if 'uptime (min)' in pick_df.columns else 0.0
-        pick_downtime = float(pick_df['downtime (min)'].sum()) if 'downtime (min)' in pick_df.columns else 0.0
+        # Uptime/downtime are calculated from equipment state, not per job
+        # All job rows have the same values, so take the first (or max) instead of summing
+        if 'uptime (min)' in pick_df.columns and 'downtime (min)' in pick_df.columns:
+            pick_uptime = float(pick_df['uptime (min)'].iloc[0]) if len(pick_df) > 0 else 0.0
+            pick_downtime = float(pick_df['downtime (min)'].iloc[0]) if len(pick_df) > 0 else 0.0
+        else:
+            pick_uptime = 0.0
+            pick_downtime = 0.0
         
         # Pick OEE = Availability × Pick Quality Accuracy × Quality (100%)
         # Quality is always 100% for individual cell OEE calculation
         # Pick Quality Accuracy = successful_picks / total_picks
+        # Now we have component-level data with pick_status, so we count successful vs total
         pick_quality_accuracy = 1.0  # Default to 100% if data not available
-        if 'successful_picks' in pick_df.columns and 'total_picks' in pick_df.columns:
-            total_successful = int(pick_df['successful_picks'].sum()) if pick_df['successful_picks'].notna().any() else 0
-            total_picks = int(pick_df['total_picks'].sum()) if pick_df['total_picks'].notna().any() else 0
+        if 'pick_status' in pick_df.columns:
+            # Count successful picks (pick_status = 'successful') vs total picks (successful + failed)
+            total_successful = int((pick_df['pick_status'] == 'successful').sum())
+            total_picks = int((pick_df['pick_status'].isin(['successful', 'failed'])).sum())
+            
+            log_collector.add_info(f"Pick quality calculation: {len(pick_df)} components, {total_successful} successful, {total_picks} total picks")
+            
             if total_picks > 0:
                 pick_quality_accuracy = calculate_quality_accuracy(total_successful, total_picks)
                 log_collector.add_info(f"Pick Quality: {total_successful}/{total_picks} successful picks ({pick_quality_accuracy * 100:.1f}%)")
             else:
+                log_collector.add_warning("No pick attempts found (all components are 'not_picked'), using 100%")
+        elif 'successful_picks' in pick_df.columns and 'total_picks' in pick_df.columns:
+            # Fallback: use pre-calculated columns if available
+            total_successful = int(pick_df['successful_picks'].sum()) if pick_df['successful_picks'].notna().any() else 0
+            total_picks = int(pick_df['total_picks'].sum()) if pick_df['total_picks'].notna().any() else 0
+            if total_picks > 0:
+                pick_quality_accuracy = calculate_quality_accuracy(total_successful, total_picks)
+                log_collector.add_info(f"Pick Quality (fallback): {total_successful}/{total_picks} successful picks ({pick_quality_accuracy * 100:.1f}%)")
+            else:
                 log_collector.add_warning("No pick data available for quality calculation, using 100%")
         else:
-            log_collector.add_warning("Pick quality metrics (successful_picks/total_picks) not found in data, using 100%")
+            log_collector.add_warning("Pick quality metrics (pick_status) not found in data, using 100%")
         
         # Note: quality_ratio parameter in calculate_cell_oee is used as "Pick Quality Accuracy" for pick cell
         pick_oee = calculate_cell_oee('pick', pick_uptime, pick_downtime, quality_ratio=pick_quality_accuracy)
@@ -808,21 +830,21 @@ if has_data:
         mime="text/csv"
     )
     
-    # Show data preview (only for enabled cells)
+    # Show data preview (only for enabled cells) - full data for each cell
     with st.expander("📋 Data Preview"):
         if 'printer' in enabled_cells and not print_df.empty:
-            st.subheader("Print Data")
-            st.dataframe(print_df.head(10), use_container_width=True)
+            st.subheader(f"Print Data ({len(print_df)} records)")
+            st.dataframe(print_df, use_container_width=True)
         
         if 'cut' in enabled_cells and not cut_df.empty:
-            st.subheader("Cut Data")
-            st.dataframe(cut_df.head(10), use_container_width=True)
+            st.subheader(f"Cut Data ({len(cut_df)} records)")
+            st.dataframe(cut_df, use_container_width=True)
         
         if 'pick' in enabled_cells and not pick_df.empty:
-            st.subheader("Pick Data")
-            st.dataframe(pick_df.head(10), use_container_width=True)
+            st.subheader(f"Pick Data ({len(pick_df)} records)")
+            st.dataframe(pick_df, use_container_width=True)
         
         if detected_batches and not quality_df.empty:
-            st.subheader("Quality Metrics")
+            st.subheader(f"Quality Metrics ({len(quality_df)} records)")
             st.dataframe(quality_df, use_container_width=True)
 

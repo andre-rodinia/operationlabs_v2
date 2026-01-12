@@ -95,11 +95,21 @@ where:
   Quality_accuracy = Successful Picks / Total Picks
 ```
 
-### Bottleneck Identification
+### System OEE
+
+The overall system OEE is calculated as the product of individual cell OEE values:
 
 ```python
-Bottleneck = min(OEE_printer, OEE_cut, OEE_pick)
+OEE_system = OEE_printer × OEE_cut × OEE_pick
 ```
+
+**Example:**
+- Printer OEE: 90.1%
+- Cut OEE: 84.6%
+- Pick OEE: 90.1%
+- **System OEE:** 0.901 × 0.846 × 0.901 = **68.7%**
+
+This multiplicative approach reflects that all cells must perform well for the system to achieve high overall effectiveness. Each cell's performance directly impacts the final output, making it essential to monitor and optimize each cell independently.
 
 **Note:** Overall quality metrics (from QC data) are tracked separately to avoid time offset issues between production and quality inspection.
 
@@ -108,24 +118,20 @@ Bottleneck = min(OEE_printer, OEE_cut, OEE_pick)
 ### Basic OEE Calculation
 
 ```python
-from core.calculations.oee import calculate_cell_oee, identify_bottleneck
+from core.calculations.oee import calculate_cell_oee
 
 # Calculate OEE for each cell
 printer_metrics = calculate_cell_oee('printer', uptime=350, downtime=90, performance_ratio=0.87)
 cut_metrics = calculate_cell_oee('cut', uptime=280, downtime=20)
 pick_metrics = calculate_cell_oee('pick', uptime=310, downtime=50, quality_ratio=0.94)
 
-# Identify bottleneck
-bottleneck = identify_bottleneck(
-    printer_metrics.oee,
-    cut_metrics.oee,
-    pick_metrics.oee
-)
+# Calculate system OEE
+system_oee = printer_metrics.oee * cut_metrics.oee * pick_metrics.oee
 
 print(f"Printer OEE: {printer_metrics.oee:.1%}")
 print(f"Cut OEE: {cut_metrics.oee:.1%}")
 print(f"Pick OEE: {pick_metrics.oee:.1%}")
-print(f"\nBottleneck: {bottleneck.limiting_factor}")
+print(f"\nSystem OEE: {system_oee:.1%}")
 ```
 
 ### Time Window Management

@@ -375,8 +375,17 @@ def render_pick_metrics_detailed(
         pick_df: DataFrame with pick job data containing uptime, downtime
     """
     # Calculate aggregated values from pick_df
-    uptime_min = float(pick_df['uptime (min)'].sum()) if 'uptime (min)' in pick_df.columns else 0.0
-    downtime_min = float(pick_df['downtime (min)'].sum()) if 'downtime (min)' in pick_df.columns else 0.0
+    # Uptime/downtime are calculated from equipment state, not per component
+    # All component rows have the same values, so take the first instead of summing
+    if 'uptime (min)' in pick_df.columns and len(pick_df) > 0:
+        uptime_min = float(pick_df['uptime (min)'].iloc[0])
+    else:
+        uptime_min = 0.0
+    
+    if 'downtime (min)' in pick_df.columns and len(pick_df) > 0:
+        downtime_min = float(pick_df['downtime (min)'].iloc[0])
+    else:
+        downtime_min = 0.0
     
     # Calculate theoretical and actual speeds if available
     theoretical_speed = 0.0
