@@ -200,30 +200,64 @@ def apply_qc_quality_to_cells(
             
             # Apply QC quality based on cell type
             if cell_name == 'Pick':
-                # Pick: Combine pick success rate with QC pass rate
-                # Quality = Pick Success Rate × QC Pass Rate
-                df['quality'] = np.where(
-                    df['quality_qc_percent'].notna(),
-                    (df['quality_before_qc'] / 100) * (df['quality_qc_percent'] / 100) * 100,
-                    df['quality_before_qc']  # Keep original if QC not available
-                )
-                logger.info(f"Pick: Combined pick success × QC pass rate")
+                # Pick: Two-layer quality = Robot Accuracy × QC Pick Quality
+                # Store robot accuracy (original quality)
+                df['robot_accuracy'] = df['quality_before_qc'].copy()
+                
+                # Calculate QC pick quality: (total_components - pick_defects) / total_components
+                # Check if quality_breakdown has pick_defects column
+                if 'pick_defects' in quality_breakdown.columns and 'total_components' in quality_breakdown.columns:
+                    qc_pick_quality_map = {}
+                    for _, qc_row in quality_breakdown.iterrows():
+                        batch_id = qc_row.get('production_batch_id')
+                        total = qc_row.get('total_components', 0)
+                        defects = qc_row.get('pick_defects', 0)
+                        if total > 0:
+                            qc_pick_quality_map[batch_id] = ((total - defects) / total) * 100
+                        else:
+                            qc_pick_quality_map[batch_id] = 100.0
+                    
+                    df['qc_pick_quality_percent'] = df['batch_id_numeric'].map(qc_pick_quality_map)
+                    
+                    # Combined quality = Robot Accuracy × QC Pick Quality
+                    df['quality'] = np.where(
+                        df['qc_pick_quality_percent'].notna(),
+                        (df['robot_accuracy'] / 100) * (df['qc_pick_quality_percent'] / 100) * 100,
+                        df['robot_accuracy']  # Keep robot accuracy if QC not available
+                    )
+                    logger.info(f"Pick: Two-layer quality applied (Robot Accuracy × QC Pick Quality)")
+                else:
+                    # Fallback to original method if pick_defects not available
+                    df['quality'] = np.where(
+                        df['quality_qc_percent'].notna(),
+                        (df['quality_before_qc'] / 100) * (df['quality_qc_percent'] / 100) * 100,
+                        df['quality_before_qc']
+                    )
+                    logger.info(f"Pick: Combined pick success × QC pass rate (fallback)")
             else:
-                # Print/Cut: QC quality directly replaces assumed 100%
-                df['quality'] = np.where(
-                    df['quality_qc_percent'].notna(),
-                    df['quality_qc_percent'],
-                    df['quality_before_qc']
-                )
+                # Print/Cut: Keep job-level quality at 100% (quality calculated at batch level only)
+                # Store batch-level quality for reference but don't apply to jobs
+                df['batch_quality_percent'] = df['quality_qc_percent']
+                # Keep quality at 100% for job-level display
+                df['quality'] = df['quality_before_qc']  # Keep at 100%
+                logger.info(f"{cell_name}: Job-level quality kept at 100%, batch-level quality stored separately")
             
             # Recalculate OEE with new quality
-            df['oee_before_qc'] = df['oee'].copy()
-            df['oee'] = (
-                (df['availability'] / 100) *
-                (df['performance'] / 100) *
-                (df['quality'] / 100) *
-                100
-            )
+            # For Print/Cut, quality stays at 100% so OEE doesn't change
+            # For Pick, quality may have changed so recalculate
+            if cell_name != 'Pick':
+                # Print/Cut: OEE stays the same since quality is still 100%
+                df['oee_before_qc'] = df['oee'].copy()
+                # OEE remains unchanged (quality still 100%)
+            else:
+                # Pick: Recalculate OEE with new quality
+                df['oee_before_qc'] = df['oee'].copy()
+                df['oee'] = (
+                    (df['availability'] / 100) *
+                    (df['performance'] / 100) *
+                    (df['quality'] / 100) *
+                    100
+                )
             
             qc_applied_count = df['quality_qc_percent'].notna().sum()
             logger.info(f"{cell_name}: Applied QC to {qc_applied_count}/{len(df)} jobs")

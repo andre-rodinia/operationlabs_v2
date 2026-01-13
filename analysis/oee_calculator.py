@@ -6,13 +6,16 @@ import pandas as pd
 import logging
 from typing import Dict
 
+from core.db.fetchers import get_batch_pick_time_window, fetch_robot_equipment_states
+
 logger = logging.getLogger(__name__)
 
 def calculate_batch_metrics(
     print_df: pd.DataFrame,
     cut_df: pd.DataFrame,
     pick_df: pd.DataFrame,
-    batch_ids: list
+    batch_ids: list,
+    quality_breakdown: pd.DataFrame = None
 ) -> pd.DataFrame:
     """
     Calculate batch-level OEE metrics by aggregating job-level data.
@@ -32,39 +35,256 @@ def calculate_batch_metrics(
     """
     batch_metrics = []
 
+    # Helper function to normalize batch_id for comparison
+    def normalize_batch_id(bid):
+        if pd.isna(bid):
+            return None
+        bid_str = str(bid)
+        # Remove B10- prefix and B prefix, strip whitespace, then strip leading zeros
+        normalized = bid_str.replace('B10-', '').replace('B', '').strip()
+        # Strip leading zeros to handle formats like "0000000955" vs "955"
+        try:
+            # If it's a number, convert to int then back to string to remove leading zeros
+            normalized = str(int(normalized))
+        except (ValueError, TypeError):
+            # If not a number, keep as is
+            pass
+        return normalized
+
     for batch_id in batch_ids:
         # Filter jobs for this batch
-        batch_print = print_df[print_df['batch_id'] == batch_id] if not print_df.empty else pd.DataFrame()
-        batch_cut = cut_df[cut_df['batch_id'] == batch_id] if not cut_df.empty else pd.DataFrame()
-        batch_pick = pick_df[pick_df['batch_id'] == batch_id] if not pick_df.empty else pd.DataFrame()
+        # Handle different batch_id formats (e.g., "B10-0000000955", "955", "B955")
+        batch_id_str = str(batch_id)
+        batch_id_clean = normalize_batch_id(batch_id_str)
+        
+        logger.info(f"Filtering for batch_id: '{batch_id}' (normalized: '{batch_id_clean}')")
+        
+        # Try multiple formats for matching
+        batch_print = pd.DataFrame()
+        batch_cut = pd.DataFrame()
+        batch_pick = pd.DataFrame()
+        
+        if not print_df.empty and 'batch_id' in print_df.columns:
+            # Try exact match first
+            batch_print = print_df[print_df['batch_id'] == batch_id]
+            if batch_print.empty:
+                # Try matching cleaned version
+                print_df_normalized = print_df['batch_id'].apply(normalize_batch_id)
+                batch_print = print_df[print_df_normalized == batch_id_clean]
+            logger.debug(f"  Print: found {len(batch_print)} jobs (exact match: {len(print_df[print_df['batch_id'] == batch_id])}, normalized match: {len(batch_print)})")
+        
+        if not cut_df.empty and 'batch_id' in cut_df.columns:
+            batch_cut = cut_df[cut_df['batch_id'] == batch_id]
+            if batch_cut.empty:
+                cut_df_normalized = cut_df['batch_id'].apply(normalize_batch_id)
+                batch_cut = cut_df[cut_df_normalized == batch_id_clean]
+            logger.debug(f"  Cut: found {len(batch_cut)} jobs")
+        
+        if not pick_df.empty and 'batch_id' in pick_df.columns:
+            logger.debug(f"  Pick: pick_df has {len(pick_df)} rows, batch_id column exists")
+            logger.debug(f"  Pick: Unique batch_ids in pick_df: {pick_df['batch_id'].unique().tolist()}")
+            logger.debug(f"  Pick: Looking for batch_id='{batch_id}' or normalized='{batch_id_clean}'")
+            
+            # Try exact match first
+            batch_pick = pick_df[pick_df['batch_id'] == batch_id]
+            logger.debug(f"  Pick: Exact match found {len(batch_pick)} jobs")
+            
+            if batch_pick.empty:
+                # Try matching cleaned version
+                pick_df_normalized = pick_df['batch_id'].apply(normalize_batch_id)
+                logger.debug(f"  Pick: Normalized batch_ids: {pick_df_normalized.unique().tolist()}")
+                logger.debug(f"  Pick: Looking for normalized='{batch_id_clean}'")
+                batch_pick = pick_df[pick_df_normalized == batch_id_clean]
+                logger.debug(f"  Pick: Normalized match found {len(batch_pick)} jobs")
+                if len(batch_pick) > 0:
+                    logger.debug(f"  Pick: batch_ids in filtered data: {batch_pick['batch_id'].unique().tolist()}")
+            else:
+                logger.debug(f"  Pick: Using exact match, found {len(batch_pick)} jobs")
+        
+        logger.info(f"Batch {batch_id}: Print={len(batch_print)} jobs, Cut={len(batch_cut)} jobs, Pick={len(batch_pick)} jobs")
 
-        # Aggregate metrics (mean for percentages, sum for times)
+        # Helper function to calculate weighted average
+        def weighted_avg(df, value_col, weight_col):
+            if df.empty or value_col not in df.columns or weight_col not in df.columns:
+                return 0.0
+            total_weight = df[weight_col].sum()
+            if total_weight == 0:
+                return 0.0
+            return (df[value_col] * df[weight_col]).sum() / total_weight
+        
+        # Calculate batch-level metrics with weighted averages for availability and performance
+        # Quality is calculated from batch-level QC data (stored in batch_quality_percent or quality_qc_percent)
+        
+        # Print metrics
+        if not batch_print.empty:
+            logger.debug(f"Batch {batch_id} Print: {len(batch_print)} jobs, columns: {batch_print.columns.tolist()}")
+            print_total_time = batch_print['total_time_sec'].sum() if 'total_time_sec' in batch_print.columns else 0
+            print_uptime = batch_print['uptime_sec'].sum() if 'uptime_sec' in batch_print.columns else 0
+            print_downtime = batch_print['downtime_sec'].sum() if 'downtime_sec' in batch_print.columns else 0
+            logger.debug(f"Batch {batch_id} Print: total_time={print_total_time}, uptime={print_uptime}, downtime={print_downtime}")
+            
+            # Weighted availability: Σ(availability × total_time) / Σ(total_time)
+            if 'availability' in batch_print.columns and 'total_time_sec' in batch_print.columns:
+                print_availability = weighted_avg(batch_print, 'availability', 'total_time_sec')
+            else:
+                print_availability = batch_print['availability'].mean() if 'availability' in batch_print.columns else 0
+            
+            # Weighted performance: Σ(performance × uptime) / Σ(uptime)
+            if 'performance' in batch_print.columns and 'uptime_sec' in batch_print.columns and print_uptime > 0:
+                print_performance = weighted_avg(batch_print, 'performance', 'uptime_sec')
+            else:
+                print_performance = batch_print['performance'].mean() if 'performance' in batch_print.columns else 0
+        else:
+            print_total_time = 0
+            print_uptime = 0
+            print_downtime = 0
+            print_availability = 0
+            print_performance = 0
+        
+        # Quality from batch-level QC data (calculate from quality_breakdown)
+        # Extract numeric batch ID for lookup
+        batch_id_numeric = int(str(batch_id).replace('B10-', '').replace('B', '').strip()) if isinstance(batch_id, str) else batch_id
+        
+        # Get batch quality from quality_breakdown if available
+        print_quality = 100.0  # Default
+        if quality_breakdown is not None and not quality_breakdown.empty:
+            batch_qc = quality_breakdown[quality_breakdown['production_batch_id'] == batch_id_numeric]
+            if not batch_qc.empty:
+                # Calculate Print quality: (total_components - print_defects) / total_components
+                if 'total_components' in batch_qc.columns and 'print_defects' in batch_qc.columns:
+                    total = batch_qc['total_components'].iloc[0]
+                    defects = batch_qc['print_defects'].iloc[0]
+                    if total > 0:
+                        print_quality = ((total - defects) / total) * 100
+                        logger.debug(f"Batch {batch_id}: Print quality = ({total} - {defects}) / {total} = {print_quality:.2f}%")
+        
+        # Cut metrics
+        if not batch_cut.empty:
+            logger.debug(f"Batch {batch_id} Cut: {len(batch_cut)} jobs, columns: {batch_cut.columns.tolist()}")
+            cut_total_time = batch_cut['total_time_sec'].sum() if 'total_time_sec' in batch_cut.columns else 0
+            cut_uptime = batch_cut['uptime_sec'].sum() if 'uptime_sec' in batch_cut.columns else 0
+            cut_downtime = batch_cut['downtime_sec'].sum() if 'downtime_sec' in batch_cut.columns else 0
+            logger.debug(f"Batch {batch_id} Cut: total_time={cut_total_time}, uptime={cut_uptime}, downtime={cut_downtime}")
+            
+            # Weighted availability: Σ(availability × total_time) / Σ(total_time)
+            if 'availability' in batch_cut.columns and 'total_time_sec' in batch_cut.columns:
+                cut_availability = weighted_avg(batch_cut, 'availability', 'total_time_sec')
+            else:
+                cut_availability = batch_cut['availability'].mean() if 'availability' in batch_cut.columns else 0
+            
+            # Weighted performance: Σ(performance × uptime) / Σ(uptime)
+            if 'performance' in batch_cut.columns and 'uptime_sec' in batch_cut.columns and cut_uptime > 0:
+                cut_performance = weighted_avg(batch_cut, 'performance', 'uptime_sec')
+            else:
+                cut_performance = batch_cut['performance'].mean() if 'performance' in batch_cut.columns else 0
+        else:
+            cut_total_time = 0
+            cut_uptime = 0
+            cut_downtime = 0
+            cut_availability = 0
+            cut_performance = 0
+        
+        # Quality from batch-level QC data (calculate from quality_breakdown)
+        cut_quality = 100.0  # Default
+        if quality_breakdown is not None and not quality_breakdown.empty:
+            batch_qc = quality_breakdown[quality_breakdown['production_batch_id'] == batch_id_numeric]
+            if not batch_qc.empty:
+                # Calculate Cut quality: (total_components - cut_defects) / total_components
+                if 'total_components' in batch_qc.columns and 'cut_defects' in batch_qc.columns:
+                    total = batch_qc['total_components'].iloc[0]
+                    defects = batch_qc['cut_defects'].iloc[0]
+                    if total > 0:
+                        cut_quality = ((total - defects) / total) * 100
+                        logger.debug(f"Batch {batch_id}: Cut quality = ({total} - {defects}) / {total} = {cut_quality:.2f}%")
+        
+        # Pick metrics - use equipment state data for availability
+        logger.info(f"🤖 Calculating Pick metrics for batch {batch_id}")
+        logger.info(f"  batch_pick empty: {batch_pick.empty}")
+        if not batch_pick.empty:
+            logger.info(f"  batch_pick columns: {batch_pick.columns.tolist()}")
+            logger.info(f"  batch_pick shape: {batch_pick.shape}")
+            logger.info(f"  batch_pick batch_ids: {batch_pick['batch_id'].unique().tolist() if 'batch_id' in batch_pick.columns else 'N/A'}")
+        
+        # Get batch time window from Pick JobReports (sheetStart_ts to sheetEnd_ts)
+        # Use the already-filtered batch_pick if available (it's already filtered by normalized batch_id)
+        if not batch_pick.empty:
+            # batch_pick is already filtered, so we can use it directly without filtering again
+            # But we still need to pass batch_id for logging
+            pick_start_ts, pick_end_ts = get_batch_pick_time_window(batch_pick, batch_id)
+        else:
+            # Fallback: try with full pick_df (will filter inside function with normalized matching)
+            pick_start_ts, pick_end_ts = get_batch_pick_time_window(pick_df, batch_id)
+        
+        if pick_start_ts and pick_end_ts:
+            logger.info(f"  ✅ Got time window: {pick_start_ts} to {pick_end_ts}")
+            # Query equipment states for the batch time window
+            equipment_states = fetch_robot_equipment_states('Pick1', pick_start_ts, pick_end_ts)
+            running_time_sec = equipment_states['running_time_sec']
+            downtime_sec = equipment_states['downtime_sec']
+            total_time_sec = running_time_sec + downtime_sec
+            
+            logger.info(f"  Equipment states returned: {equipment_states}")
+            
+            # Calculate availability from equipment states
+            if total_time_sec > 0:
+                pick_availability = (running_time_sec / total_time_sec) * 100
+                logger.info(f"  ✅ Calculated availability: {pick_availability:.2f}% = ({running_time_sec:.1f}s / {total_time_sec:.1f}s) × 100")
+            else:
+                pick_availability = 0
+                logger.warning(f"  ⚠️ Total time is 0, setting availability to 0%")
+            
+            pick_total_time = total_time_sec
+            logger.info(f"  Final: availability={pick_availability:.2f}%, total_time={pick_total_time:.1f}s")
+        else:
+            # Fallback to job-level data if time window not available
+            logger.warning(f"  ❌ Could not get time window (start={pick_start_ts}, end={pick_end_ts}), using job-level data fallback")
+            pick_total_time = batch_pick['total_time_sec'].sum() if not batch_pick.empty and 'total_time_sec' in batch_pick.columns else 0
+            pick_uptime = batch_pick['uptime_sec'].sum() if not batch_pick.empty and 'uptime_sec' in batch_pick.columns else 0
+            pick_availability = weighted_avg(batch_pick, 'availability', 'total_time_sec') if not batch_pick.empty and 'total_time_sec' in batch_pick.columns else 0
+            logger.info(f"  Fallback: availability={pick_availability:.2f}%, total_time={pick_total_time:.1f}s")
+        
+        # Performance is always 100% for Pick
+        pick_performance = 100.0
+        
+        # Quality from batch-level QC data or job-level average (Pick uses job-level quality)
+        pick_quality = batch_pick['quality'].mean() if not batch_pick.empty else 0
+        logger.info(f"  Pick quality: {pick_quality:.2f}%")
+        
+        # Calculate OEE
+        pick_oee = (pick_availability / 100) * (pick_performance / 100) * (pick_quality / 100) * 100
+        logger.info(f"  ✅ Final Pick OEE: {pick_oee:.2f}% = ({pick_availability:.2f}% × {pick_performance:.2f}% × {pick_quality:.2f}%) / 10000")
+        
+        # Calculate OEE from weighted components
+        print_oee = (print_availability / 100) * (print_performance / 100) * (print_quality / 100) * 100
+        cut_oee = (cut_availability / 100) * (cut_performance / 100) * (cut_quality / 100) * 100
+        pick_oee = (pick_availability / 100) * (pick_performance / 100) * (pick_quality / 100) * 100
+        
         metrics = {
             'batch_id': batch_id,
 
             # Print metrics
             'print_job_count': len(batch_print),
-            'print_oee': batch_print['oee'].mean() if not batch_print.empty else 0,
-            'print_availability': batch_print['availability'].mean() if not batch_print.empty else 0,
-            'print_performance': batch_print['performance'].mean() if not batch_print.empty else 0,
-            'print_quality': batch_print['quality'].mean() if not batch_print.empty else 0,
-            'print_total_time_sec': batch_print['total_time_sec'].sum() if not batch_print.empty else 0,
+            'print_oee': print_oee,
+            'print_availability': print_availability,
+            'print_performance': print_performance,
+            'print_quality': print_quality,
+            'print_total_time_sec': print_total_time,
 
             # Cut metrics
             'cut_job_count': len(batch_cut),
-            'cut_oee': batch_cut['oee'].mean() if not batch_cut.empty else 0,
-            'cut_availability': batch_cut['availability'].mean() if not batch_cut.empty else 0,
-            'cut_performance': batch_cut['performance'].mean() if not batch_cut.empty else 0,
-            'cut_quality': batch_cut['quality'].mean() if not batch_cut.empty else 0,
-            'cut_total_time_sec': batch_cut['total_time_sec'].sum() if not batch_cut.empty else 0,
+            'cut_oee': cut_oee,
+            'cut_availability': cut_availability,
+            'cut_performance': cut_performance,
+            'cut_quality': cut_quality,
+            'cut_total_time_sec': cut_total_time,
 
             # Pick metrics
             'pick_job_count': len(batch_pick),
-            'pick_oee': batch_pick['oee'].mean() if not batch_pick.empty else 0,
-            'pick_availability': batch_pick['availability'].mean() if not batch_pick.empty else 0,
-            'pick_performance': batch_pick['performance'].mean() if not batch_pick.empty else 0,
-            'pick_quality': batch_pick['quality'].mean() if not batch_pick.empty else 0,
-            'pick_total_time_sec': batch_pick['total_time_sec'].sum() if not batch_pick.empty else 0,
+            'pick_oee': pick_oee,
+            'pick_availability': pick_availability,
+            'pick_performance': pick_performance,
+            'pick_quality': pick_quality,
+            'pick_total_time_sec': pick_total_time,
         }
 
         batch_metrics.append(metrics)

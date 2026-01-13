@@ -377,12 +377,16 @@ def render_pick_metrics_detailed(
     # Calculate aggregated values from pick_df
     # Uptime/downtime are calculated from equipment state, not per component
     # All component rows have the same values, so take the first instead of summing
-    if 'uptime (min)' in pick_df.columns and len(pick_df) > 0:
+    if 'uptime_min' in pick_df.columns and len(pick_df) > 0:
+        uptime_min = float(pick_df['uptime_min'].sum())
+    elif 'uptime (min)' in pick_df.columns and len(pick_df) > 0:
         uptime_min = float(pick_df['uptime (min)'].iloc[0])
     else:
         uptime_min = 0.0
     
-    if 'downtime (min)' in pick_df.columns and len(pick_df) > 0:
+    if 'downtime_min' in pick_df.columns and len(pick_df) > 0:
+        downtime_min = float(pick_df['downtime_min'].sum())
+    elif 'downtime (min)' in pick_df.columns and len(pick_df) > 0:
         downtime_min = float(pick_df['downtime (min)'].iloc[0])
     else:
         downtime_min = 0.0
@@ -444,15 +448,30 @@ def render_pick_metrics_detailed(
             unsafe_allow_html=True
         )
     with col3:
-        st.markdown(
-            f"""
-            <div style="text-align: center;">
-                <div style="font-size: 0.9em; color: #666; margin-bottom: 0.3rem;">Quality</div>
-                <div style="font-size: 1.8em; font-weight: bold; color: #2ca02c;">{metrics.quality * 100:.1f}%</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        # Check if robot_accuracy is available (two-layer quality)
+        if 'robot_accuracy' in pick_df.columns and len(pick_df) > 0:
+            robot_acc = float(pick_df['robot_accuracy'].mean())
+            combined = metrics.quality * 100
+            st.markdown(
+                f"""
+                <div style="text-align: center;">
+                    <div style="font-size: 0.9em; color: #666; margin-bottom: 0.3rem;">Quality</div>
+                    <div style="font-size: 1.8em; font-weight: bold; color: #2ca02c;">{combined:.1f}%</div>
+                    <div style="font-size: 0.7em; color: #999; margin-top: 0.3rem;">Robot Accuracy: {robot_acc:.1f}%</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                f"""
+                <div style="text-align: center;">
+                    <div style="font-size: 0.9em; color: #666; margin-bottom: 0.3rem;">Quality</div>
+                    <div style="font-size: 1.8em; font-weight: bold; color: #2ca02c;">{metrics.quality * 100:.1f}%</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
     
     st.divider()
     
@@ -482,7 +501,34 @@ def render_pick_metrics_detailed(
     
     st.divider()
     
-    # Row 3: Speed Metrics (if available)
+    # Row 3: Component Metrics
+    st.markdown("#### Component Metrics")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if 'components_per_job' in pick_df.columns:
+            total = int(pick_df['components_per_job'].sum())
+        elif 'components_completed' in pick_df.columns and 'components_failed' in pick_df.columns:
+            total = int(pick_df['components_completed'].sum() + pick_df['components_failed'].sum())
+        else:
+            total = 0
+        st.markdown(f"**Total:** {total}")
+    with col2:
+        if 'components_completed' in pick_df.columns:
+            completed = int(pick_df['components_completed'].sum())
+        else:
+            completed = 0
+        st.markdown(f"**Completed:** {completed}")
+    with col3:
+        if 'components_failed' in pick_df.columns:
+            failed = int(pick_df['components_failed'].sum())
+        else:
+            failed = 0
+        st.markdown(f"**Failed:** {failed}")
+    
+    st.divider()
+    
+    # Row 4: Speed Metrics (if available)
     if theoretical_speed > 0 or actual_speed > 0:
         st.markdown("#### Speed Metrics")
         col1, col2 = st.columns(2)

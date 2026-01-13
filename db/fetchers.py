@@ -64,7 +64,7 @@ def fetch_batches_for_day(day_start: str, day_end: str) -> pd.DataFrame:
             cursor.close()
 
         if not job_records:
-            logger.info(f"No JobReports found for {day_start} to {day_end}")
+            logger.debug(f"No JobReports found for {day_start} to {day_end}")
             return pd.DataFrame(columns=['batch_id', 'job_count', 'first_job_time', 'last_job_time'])
 
         # Extract job IDs and timestamps

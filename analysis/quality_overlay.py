@@ -88,7 +88,7 @@ def apply_qc_overlay(
         cut_df = cut_df.drop(columns=['pass_rate'])
         logger.info(f"Applied QC overlay to {len(cut_df)} Cut jobs")
 
-    # Apply to Pick (compound quality)
+    # Apply to Pick (two-layer quality: Robot Accuracy × QC Pick Quality)
     if not pick_df.empty:
         # Ensure batch_id is string type and normalize format
         if 'batch_id' in pick_df.columns:
@@ -99,17 +99,20 @@ def apply_qc_overlay(
         pick_df = pick_df.merge(qc_by_batch, left_on='batch_id_clean', right_on='batch_id_clean', how='left', suffixes=('', '_qc'))
         # Drop temporary columns
         pick_df = pick_df.drop(columns=['batch_id_clean'], errors='ignore')
-        # Store original pick quality (success rate)
-        pick_original_quality = pick_df['quality'].copy()
-        # Compound quality: pick_success_rate × qc_pass_rate / 100
-        # (component must be successfully picked AND pass QC inspection)
+        
+        # Store robot accuracy (original quality = success_rate)
+        pick_df['robot_accuracy'] = pick_df['quality'].copy()
+        
+        # For two-layer quality, we need pick_defects from quality breakdown
+        # For now, use pass_rate as QC pick quality (will be updated when quality_breakdown is available)
+        # Compound quality: robot_accuracy × qc_pass_rate / 100
         pick_df['quality'] = np.where(
             pick_df['pass_rate'].notna(),
-            (pick_original_quality * pick_df['pass_rate']) / 100,
-            pick_original_quality  # Keep pick success rate if no QC data
+            (pick_df['robot_accuracy'] * pick_df['pass_rate']) / 100,
+            pick_df['robot_accuracy']  # Keep robot accuracy if no QC data
         )
         pick_df['oee'] = (pick_df['availability'] * pick_df['performance'] * pick_df['quality']) / 10000
         pick_df = pick_df.drop(columns=['pass_rate'])
-        logger.info(f"Applied QC overlay to {len(pick_df)} Pick jobs")
+        logger.info(f"Applied QC overlay to {len(pick_df)} Pick jobs (Robot Accuracy × QC Pass Rate)")
 
     return print_df, cut_df, pick_df

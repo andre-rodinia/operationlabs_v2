@@ -29,7 +29,13 @@ from db.fetchers import (
     fetch_batch_structure,
     fetch_fpy_data
 )
+from core.db.fetchers import (
+    fetch_pick_jobreports_by_jobs,
+    validate_job_count_consistency,
+    fetch_batch_quality_breakdown_v2
+)
 from analysis.quality_overlay import apply_qc_overlay
+from core.analysis.oee import apply_qc_quality_to_cells
 from analysis.oee_calculator import calculate_batch_metrics, calculate_daily_metrics
 
 # Configure logging
@@ -197,14 +203,50 @@ if st.session_state.batches_df is not None and not st.session_state.batches_df.e
                     # Note: Cut may happen on different day than Print, so we match by job_id + temporal proximity
                     print_df = fetch_print_jobreports(job_ids)
                     cut_df = fetch_cut_jobreports(job_ids, print_df=print_df)
-                    pick_df = fetch_pick_jobreports(job_ids)
+                    
+                    # Fetch pick data using new function
+                    pick_df = fetch_pick_jobreports_by_jobs(job_ids, time_window=None)
+                    
+                    # Merge sheet_index from Print to Pick (Pick jobs don't have sheet_index in their JobReport)
+                    if not pick_df.empty and not print_df.empty and 'sheet_index' in print_df.columns:
+                        # Create a lookup map from print_df: job_id -> sheet_index
+                        print_sheet_map = print_df.set_index('job_id')['sheet_index'].to_dict()
+                        # Map sheet_index to pick_df by job_id
+                        pick_df['sheet_index'] = pick_df['job_id'].map(print_sheet_map)
+                        logger.info(f"Merged sheet_index from Print to Pick: {pick_df['sheet_index'].notna().sum()}/{len(pick_df)} jobs matched")
+                    
+                    # Debug output
+                    if pick_df.empty:
+                        st.warning(f"⚠️ No Pick data found for {len(job_ids)} jobs")
+                        st.caption(f"Sample job IDs searched: {job_ids[:5] if len(job_ids) > 0 else 'none'}")
+                    else:
+                        st.success(f"✅ Found {len(pick_df)} Pick JobReports")
+                        st.caption(f"Sample job IDs found: {pick_df['job_id'].head(3).tolist() if 'job_id' in pick_df.columns else 'N/A'}")
+                    
+                    # Validate job count consistency
+                    validation = validate_job_count_consistency(print_df, cut_df, pick_df)
+                    if not validation['is_valid']:
+                        st.warning("⚠️ Job Count Mismatch")
+                        for msg in validation['messages']:
+                            st.text(msg)
 
                     # Try to fetch QC data (aggregated for overlay)
                     qc_df_aggregated = fetch_qc_data_for_batches(selected_batches)
+                    
+                    # Fetch quality breakdown for two-layer Pick quality and batch-level quality calculation
+                    quality_breakdown = fetch_batch_quality_breakdown_v2(selected_batches)
+                    st.session_state.quality_breakdown = quality_breakdown
 
                     if qc_df_aggregated is not None and not qc_df_aggregated.empty:
                         st.info("🔬 QC inspection data found - applying quality overlay...")
-                        print_df, cut_df, pick_df = apply_qc_overlay(print_df, cut_df, pick_df, qc_df_aggregated)
+                        # Use apply_qc_quality_to_cells for two-layer Pick quality support
+                        if not quality_breakdown.empty:
+                            print_df, cut_df, pick_df = apply_qc_quality_to_cells(
+                                print_df, cut_df, pick_df, quality_breakdown
+                            )
+                        else:
+                            # Fallback to simple overlay if quality_breakdown not available
+                            print_df, cut_df, pick_df = apply_qc_overlay(print_df, cut_df, pick_df, qc_df_aggregated)
                         st.session_state.qc_applied = True
                     else:
                         st.info("ℹ️ No QC data available - using 100% quality assumption")
@@ -251,11 +293,18 @@ if st.session_state.print_df is not None:
     print_df = st.session_state.print_df
     cut_df = st.session_state.cut_df
     pick_df = st.session_state.pick_df
+    
+    # Ensure pick_df is a DataFrame (not None)
+    if pick_df is None:
+        pick_df = pd.DataFrame()
 
     # Calculate metrics
+    # Get quality_breakdown from session state if available
+    quality_breakdown = st.session_state.get('quality_breakdown', pd.DataFrame())
     batch_metrics_df = calculate_batch_metrics(
         print_df, cut_df, pick_df,
-        st.session_state.selected_batches
+        st.session_state.selected_batches,
+        quality_breakdown=quality_breakdown
     )
 
     daily_metrics = calculate_daily_metrics(batch_metrics_df, operating_hours)
@@ -387,21 +436,24 @@ if st.session_state.print_df is not None:
                 st.info("No Cut data available")
 
         with tab3:
-            if not pick_df.empty:
+            if pick_df is not None and not pick_df.empty:
+                # Select columns for display
+                display_columns = [
+                    'job_id', 'batch_id', 'sheet_index',
+                    'job_active_window_duration', 'successful_picks_time',
+                    'order_count', 'components_completed', 'components_failed', 'components_ignored', 
+                    'avg_component_pick_time_s'
+                ]
+                
+                # Filter to only columns that exist
+                available_columns = [col for col in display_columns if col in pick_df.columns]
+                display_df = pick_df[available_columns].copy()
+                
                 st.dataframe(
-                    pick_df[[
-                        'job_id', 'batch_id', 'sheet_index',
-                        'availability', 'performance', 'quality', 'oee',
-                        'uptime_sec', 'downtime_sec', 'total_time_sec',
-                        'components_completed', 'components_failed', 'total_attempts'
-                    ]].style.format({
-                        'availability': '{:.2f}%',
-                        'performance': '{:.2f}%',
-                        'quality': '{:.2f}%',
-                        'oee': '{:.2f}%',
-                        'uptime_sec': '{:.0f}s',
-                        'downtime_sec': '{:.0f}s',
-                        'total_time_sec': '{:.0f}s'
+                    display_df.style.format({
+                        'job_active_window_duration': '{:.2f}s',
+                        'successful_picks_time': '{:.2f}s',
+                        'avg_component_pick_time_s': '{:.2f}s'
                     }),
                     use_container_width=True,
                     hide_index=True

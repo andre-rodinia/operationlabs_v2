@@ -649,27 +649,54 @@ class SecureQueryBuilder:
             SELECT
                 j.ts,
                 j.payload::jsonb->>'jobId' AS job_id,
-                j.payload::jsonb->'data'->'ids'->>'batchId' AS "batchId",
+                -- Extract batchId from first component in componentsCompleted or componentsEvents
+                COALESCE(
+                    j.payload::jsonb->'data'->'reportData'->'closingReport'->'componentsCompleted'->0->'ids'->>'productionBatchRgId',
+                    j.payload::jsonb->'data'->'reportData'->'closingReport'->'componentsEvents'->0->'payload'->'data'->'ids'->>'productionBatchRgId',
+                    ''
+                ) AS "batchId",
+                -- sheetIndex not available in Pick JobReports - will be merged from Print JobReports by job_id
+                NULL AS "sheetIndex",
                 split_part(j.topic, '/', 6) AS cell,
 
                 -- Job-level timing
                 j.payload::jsonb->'data'->'reportData'->'closingReport'->'jobActiveWindow'->>'startTs' AS job_start,
                 j.payload::jsonb->'data'->'reportData'->'closingReport'->'jobActiveWindow'->>'endTs' AS job_end,
                 (j.payload::jsonb->'data'->'reportData'->'closingReport'->'jobActiveWindow'->>'duration_s')::numeric AS job_duration_s,
+                
+                -- Sheet timing (for batch time window calculation)
+                -- insideSummary is at data.insideSummary (same level as data.reportData)
+                j.payload::jsonb->'data'->'insideSummary'->>'sheetStart_ts' AS sheet_start_ts,
+                j.payload::jsonb->'data'->'insideSummary'->>'sheetEnd_ts' AS sheet_end_ts,
 
                 -- Uptime and Downtime
-                ((j.payload::jsonb->'data'->'time'->>'uptime')::numeric / 60.0) AS "uptime (min)",
-                ((j.payload::jsonb->'data'->'time'->>'downtime')::numeric / 60.0) AS "downtime (min)",
+                COALESCE((j.payload::jsonb->'data'->'time'->>'uptime')::numeric, 0) / 60.0 AS "uptime (min)",
+                COALESCE((j.payload::jsonb->'data'->'time'->>'downtime')::numeric, 0) / 60.0 AS "downtime (min)",
 
-                -- Pick quality metrics (successful vs total picks)
-                (j.payload::jsonb->'data'->'reportData'->'metrics'->>'successfulPicks')::int AS successful_picks,
-                (j.payload::jsonb->'data'->'reportData'->'metrics'->>'totalPicks')::int AS total_picks,
+                -- Pick quality metrics from closingReport
+                COALESCE(
+                    (j.payload::jsonb->'data'->'reportData'->'closingReport'->>'componentsPickCompleted_qty')::int,
+                    0
+                ) AS successful_picks,
+                COALESCE(
+                    (j.payload::jsonb->'data'->'reportData'->'closingReport'->>'componentsPickCompleted_qty')::int +
+                    (j.payload::jsonb->'data'->'reportData'->'closingReport'->>'componentsPickFailed_qty')::int,
+                    (j.payload::jsonb->'data'->'reportData'->'closingReport'->>'printJobComponentOrderCount')::int,
+                    0
+                ) AS total_picks,
 
-                -- Component count
-                jsonb_array_length(j.payload::jsonb->'data'->'reportData'->'closingReport'->'componentsEvents') AS component_count,
+                -- Component count from closingReport
+                COALESCE(
+                    (j.payload::jsonb->'data'->'reportData'->'closingReport'->>'printJobComponentOrderCount')::int,
+                    jsonb_array_length(j.payload::jsonb->'data'->'reportData'->'closingReport'->'componentsEvents'),
+                    0
+                ) AS component_count,
 
-                -- Component details (array of components)
-                j.payload::jsonb->'data'->'reportData'->'closingReport'->'componentsEvents' AS components_data
+                -- Component details (arrays from closingReport)
+                j.payload::jsonb->'data'->'reportData'->'closingReport'->'componentsCompleted' AS components_completed,
+                j.payload::jsonb->'data'->'reportData'->'closingReport'->'componentsFailed' AS components_failed,
+                j.payload::jsonb->'data'->'reportData'->'closingReport'->'componentsStateUnknown' AS components_state_unknown,
+                j.payload::jsonb->'data'->'reportData'->'closingReport'->'componentsEvents' AS components_events
 
             FROM jobs j
             WHERE j.topic = %s
