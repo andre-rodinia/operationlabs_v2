@@ -15,9 +15,10 @@ import pandas as pd
 from datetime import datetime, timedelta, date
 import pytz
 import logging
+from dateutil import parser as dateutil_parser
 
 from config import Config
-from db.fetchers import (
+from core.db.fetchers import (
     fetch_batches_for_day,
     fetch_job_ids_for_batch,
     fetch_print_jobreports,
@@ -27,16 +28,21 @@ from db.fetchers import (
     fetch_qc_data,
     fetch_components_per_job,
     fetch_batch_structure,
-    fetch_fpy_data
-)
-from core.db.fetchers import (
+    fetch_fpy_data,
     fetch_pick_jobreports_by_jobs,
     validate_job_count_consistency,
-    fetch_batch_quality_breakdown_v2
+    fetch_batch_quality_breakdown_v2,
+    fetch_equipment_states_with_durations
 )
 from analysis.quality_overlay import apply_qc_overlay
 from core.analysis.oee import apply_qc_quality_to_cells
 from analysis.oee_calculator import calculate_batch_metrics, calculate_daily_metrics
+from core.calculations.throughput import (
+    calculate_hourly_state_breakdown,
+    calculate_state_summary,
+    calculate_system_throughput
+)
+from ui.metrics_display import display_all_cell_timelines, display_throughput_metrics
 
 # Configure logging
 logging.basicConfig(
@@ -155,7 +161,29 @@ if st.session_state.batches_df is not None and not st.session_state.batches_df.e
     st.markdown("---")
     st.header("2️⃣ Select Batches to Analyze")
 
-    batches_df = st.session_state.batches_df
+    batches_df = st.session_state.batches_df.copy()
+
+    # Format timestamp columns to show timezone offset (+0100)
+    timestamp_columns = ['print_start', 'print_end', 'cut_start', 'cut_end', 'pick_start', 'pick_end']
+    for col in timestamp_columns:
+        if col in batches_df.columns:
+            # Convert timezone-aware datetime to string with +0100 format
+            def format_timestamp_with_tz(ts):
+                if pd.isna(ts) or ts is None:
+                    return None
+                # Convert pandas Timestamp to datetime if needed
+                if isinstance(ts, pd.Timestamp):
+                    ts = ts.to_pydatetime()
+                # If timezone-aware, format with offset
+                if hasattr(ts, 'tzinfo') and ts.tzinfo is not None:
+                    # Format as YYYY-MM-DD HH:mm:ss +0100
+                    offset = ts.strftime('%z')  # Gets +0100 or +0200 format
+                    return ts.strftime('%Y-%m-%d %H:%M:%S') + f' {offset}'
+                else:
+                    # If naive, assume it's already in UTC+1 and format accordingly
+                    return ts.strftime('%Y-%m-%d %H:%M:%S') + ' +0100'
+            
+            batches_df[col] = batches_df[col].apply(format_timestamp_with_tz)
 
     # Display batch overview with Print/Cut/Pick counts
     # Select columns to display
@@ -179,12 +207,12 @@ if st.session_state.batches_df is not None and not st.session_state.batches_df.e
             "print_jobs": st.column_config.NumberColumn("Print Jobs", width="small"),
             "cut_jobs": st.column_config.NumberColumn("Cut Jobs", width="small"),
             "pick_jobs": st.column_config.NumberColumn("Pick Jobs", width="small"),
-            "print_start": st.column_config.DatetimeColumn("Print Start", width="medium"),
-            "print_end": st.column_config.DatetimeColumn("Print End", width="medium"),
-            "cut_start": st.column_config.DatetimeColumn("Cut Start", width="medium"),
-            "cut_end": st.column_config.DatetimeColumn("Cut End", width="medium"),
-            "pick_start": st.column_config.DatetimeColumn("Pick Start", width="medium"),
-            "pick_end": st.column_config.DatetimeColumn("Pick End", width="medium")
+            "print_start": st.column_config.TextColumn("Print Start", width="medium"),
+            "print_end": st.column_config.TextColumn("Print End", width="medium"),
+            "cut_start": st.column_config.TextColumn("Cut Start", width="medium"),
+            "cut_end": st.column_config.TextColumn("Cut End", width="medium"),
+            "pick_start": st.column_config.TextColumn("Pick Start", width="medium"),
+            "pick_end": st.column_config.TextColumn("Pick End", width="medium")
         }
     )
 
@@ -290,6 +318,36 @@ if st.session_state.batches_df is not None and not st.session_state.batches_df.e
                     st.session_state.print_df = print_df
                     st.session_state.cut_df = cut_df
                     st.session_state.pick_df = pick_df
+
+                    # Step 4: Extract timestamps from batch data
+                    if batches_df is not None and not batches_df.empty and len(selected_batches) > 0:
+                        # Get the first selected batch row (assuming single batch analysis for now)
+                        batch_row = batches_df[batches_df['batch_id'].astype(str).isin([str(b) for b in selected_batches])].iloc[0]
+                        
+                        # Extract timestamps
+                        cell_timestamps = {
+                            'print_start': batch_row.get('print_start'),
+                            'print_end': batch_row.get('print_end'),
+                            'cut_start': batch_row.get('cut_start'),
+                            'cut_end': batch_row.get('cut_end'),
+                            'pick_start': batch_row.get('pick_start'),
+                            'pick_end': batch_row.get('pick_end')
+                        }
+                        
+                        # Calculate system start (earliest) and end (latest)
+                        starts = [cell_timestamps['print_start'], cell_timestamps['cut_start'], cell_timestamps['pick_start']]
+                        ends = [cell_timestamps['print_end'], cell_timestamps['cut_end'], cell_timestamps['pick_end']]
+                        
+                        starts = [s for s in starts if pd.notna(s)]
+                        ends = [e for e in ends if pd.notna(e)]
+                        
+                        if starts:
+                            cell_timestamps['system_start'] = min(starts)
+                        if ends:
+                            cell_timestamps['system_end'] = max(ends)
+                        
+                        st.session_state.cell_timestamps = cell_timestamps
+                        logger.info(f"Extracted cell timestamps: {cell_timestamps}")
 
                     st.success("✅ OEE calculation complete!")
 
@@ -773,6 +831,146 @@ if st.session_state.print_df is not None:
             mime="text/csv",
             use_container_width=True
         )
+
+    # ========================================================================
+    # 4.5: EQUIPMENT STATE ANALYSIS
+    # ========================================================================
+    
+    if 'cell_timestamps' in st.session_state and st.session_state.cell_timestamps:
+        st.markdown("---")
+        st.header("5️⃣ Equipment State Analysis")
+        
+        cell_timestamps = st.session_state.cell_timestamps
+        cell_data = {}
+        
+        with st.spinner("Loading equipment state data..."):
+            cells_config = [
+                ('Print1', 'print_start', 'print_end'),
+                ('Cut1', 'cut_start', 'cut_end'),
+                ('Pick1', 'pick_start', 'pick_end')
+            ]
+            
+            for cell_name, start_key, end_key in cells_config:
+                start_ts = cell_timestamps.get(start_key)
+                end_ts = cell_timestamps.get(end_key)
+                
+                if start_ts and end_ts:
+                    try:
+                        # Convert to datetime if string
+                        if isinstance(start_ts, str):
+                            start_ts = dateutil_parser.parse(start_ts)
+                        if isinstance(end_ts, str):
+                            end_ts = dateutil_parser.parse(end_ts)
+                        
+                        # Normalize timestamps to UTC+1 (Europe/Copenhagen) for consistent querying
+                        from dateutil.tz import gettz
+                        copenhagen_tz = gettz('Europe/Copenhagen')
+                        
+                        # Ensure timestamps are timezone-aware in UTC+1
+                        if start_ts.tzinfo is None:
+                            # Naive datetime - assume it's already in UTC+1 and localize
+                            start_ts = start_ts.replace(tzinfo=copenhagen_tz)
+                        else:
+                            # Timezone-aware - convert to UTC+1
+                            start_ts = start_ts.astimezone(copenhagen_tz)
+                        
+                        if end_ts.tzinfo is None:
+                            end_ts = end_ts.replace(tzinfo=copenhagen_tz)
+                        else:
+                            end_ts = end_ts.astimezone(copenhagen_tz)
+                        
+                        # Pass timestamps to PostgreSQL with timezone info (as ISO format strings)
+                        # PostgreSQL will handle the timezone conversion internally
+                        states_df = fetch_equipment_states_with_durations(
+                            cell=cell_name,
+                            start_ts=start_ts.isoformat(),
+                            end_ts=end_ts.isoformat()
+                        )
+                        
+                        if not states_df.empty:
+                            # Calculate hourly breakdown
+                            hourly_df = calculate_hourly_state_breakdown(
+                                states_df, start_ts, end_ts
+                            )
+                            
+                            # Calculate summary (pass start_ts and end_ts for consistent time window)
+                            summary = calculate_state_summary(states_df, start_ts, end_ts)
+                            
+                            cell_data[cell_name] = {
+                                'hourly_df': hourly_df,
+                                'summary': summary,
+                                'start_ts': start_ts,
+                                'end_ts': end_ts,
+                                'states_df': states_df
+                            }
+                        else:
+                            logger.warning(f"No equipment state data found for {cell_name}")
+                    except Exception as e:
+                        logger.error(f"Error processing {cell_name} equipment states: {e}", exc_info=True)
+                        st.error(f"Error loading {cell_name} equipment states: {e}")
+        
+        # Store in session state for throughput calculation
+        st.session_state.equipment_state_data = cell_data
+        
+        # Display timelines
+        if cell_data:
+            display_all_cell_timelines(cell_data)
+        else:
+            st.warning("No equipment state data available for selected batches")
+    
+    # ========================================================================
+    # 4.6: THROUGHPUT ANALYSIS
+    # ========================================================================
+    
+    if ('equipment_state_data' in st.session_state and 
+        st.session_state.equipment_state_data and
+        st.session_state.print_df is not None):
+        
+        st.markdown("---")
+        st.header("6️⃣ Throughput Analysis")
+        
+        with st.spinner("Calculating throughput metrics..."):
+            # Prepare data for throughput calculation
+            print_data = None
+            cut_data = None
+            pick_data = None
+            
+            equipment_data = st.session_state.equipment_state_data
+            
+            # Prepare cell data (all cells process the same total components)
+            # Component count comes from batch_structure_df, not individual cell data
+            if 'Print1' in equipment_data:
+                print_data = {
+                    'state_summary': equipment_data['Print1']['summary'],
+                    'start_ts': equipment_data['Print1']['start_ts'],
+                    'end_ts': equipment_data['Print1']['end_ts']
+                }
+            
+            if 'Cut1' in equipment_data:
+                cut_data = {
+                    'state_summary': equipment_data['Cut1']['summary'],
+                    'start_ts': equipment_data['Cut1']['start_ts'],
+                    'end_ts': equipment_data['Cut1']['end_ts']
+                }
+            
+            if 'Pick1' in equipment_data:
+                pick_data = {
+                    'state_summary': equipment_data['Pick1']['summary'],
+                    'start_ts': equipment_data['Pick1']['start_ts'],
+                    'end_ts': equipment_data['Pick1']['end_ts']
+                }
+            
+            # Calculate system throughput
+            throughput_results = calculate_system_throughput(
+                print_data=print_data,
+                cut_data=cut_data,
+                pick_data=pick_data,
+                batch_structure_df=st.session_state.get('batch_structure_df'),
+                fpy_df=st.session_state.get('fpy_df')
+            )
+            
+            # Display throughput metrics
+            display_throughput_metrics(throughput_results)
 
 # ============================================================================
 # FOOTER
