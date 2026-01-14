@@ -320,11 +320,13 @@ if st.session_state.batches_df is not None and not st.session_state.batches_df.e
                     st.session_state.pick_df = pick_df
 
                     # Step 4: Extract timestamps from batch data
-                    if batches_df is not None and not batches_df.empty and len(selected_batches) > 0:
+                    # IMPORTANT: Use the ORIGINAL batches_df from session state (with datetime objects),
+                    # NOT the formatted batches_df copy (with string timestamps for display)
+                    if st.session_state.batches_df is not None and not st.session_state.batches_df.empty and len(selected_batches) > 0:
                         # Get the first selected batch row (assuming single batch analysis for now)
-                        batch_row = batches_df[batches_df['batch_id'].astype(str).isin([str(b) for b in selected_batches])].iloc[0]
-                        
-                        # Extract timestamps
+                        batch_row = st.session_state.batches_df[st.session_state.batches_df['batch_id'].astype(str).isin([str(b) for b in selected_batches])].iloc[0]
+
+                        # Extract timestamps (these are datetime objects, NOT strings)
                         cell_timestamps = {
                             'print_start': batch_row.get('print_start'),
                             'print_end': batch_row.get('print_end'),

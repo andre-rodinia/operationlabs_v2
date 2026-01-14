@@ -3064,7 +3064,7 @@ def fetch_equipment_states_with_durations(
                 end_ts,         # 9: next_ts < %s::timestamp
                 start_ts,       # 10: next_ts - %s::timestamp
                 end_ts,         # 11: next_ts >= %s::timestamp
-                start_ts,       # 12: %s::timestamp - %s::timestamp (first)
+                end_ts,         # 12: %s::timestamp - %s::timestamp (first) - FIX: should be end_ts, not start_ts!
                 start_ts,       # 13: %s::timestamp - %s::timestamp (second)
                 end_ts,         # 14: next_ts < %s::timestamp
                 end_ts,         # 15: next_ts >= %s::timestamp
