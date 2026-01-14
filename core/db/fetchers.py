@@ -3045,8 +3045,12 @@ def fetch_equipment_states_with_durations(
                             %s::timestamp
                     END AS next_ts
                 FROM state_durations
-                WHERE ((ts > %s::timestamp AND ts < %s::timestamp)  -- States starting in window
-                   OR (ts <= %s::timestamp AND (next_ts IS NULL OR next_ts > %s::timestamp)))  -- State active at window start
+                WHERE (
+                    -- Include states that overlap with the window:
+                    -- State starts before window end AND (state ends after window start OR is still active)
+                    ts < %s::timestamp  -- State started before window end
+                    AND (next_ts IS NULL OR next_ts > %s::timestamp)  -- State ended after window start (or still active)
+                )
                 ORDER BY ts ASC;
             """
             
@@ -3055,25 +3059,23 @@ def fetch_equipment_states_with_durations(
                 cell,           # 1: cell = %s (state_before_window)
                 start_ts,       # 2: ts <= %s::timestamp (state_before_window)
                 cell,           # 3: cell = %s (states_in_window)
-                start_ts,       # 4: ts > %s::timestamp (states_in_window)
-                end_ts,         # 5: ts < %s::timestamp (states_in_window)
+                start_ts,       # 4: ts > %s::timestamp (states_in_window) - EXCLUSIVE
+                end_ts,         # 5: ts < %s::timestamp (states_in_window) - EXCLUSIVE
                 start_ts,       # 6: WHEN ts <= %s::timestamp (ts adjustment)
                 start_ts,       # 7: THEN %s::timestamp (ts adjustment)
                 start_ts,       # 8: WHEN ts <= %s::timestamp (duration calc)
                 end_ts,         # 9: next_ts < %s::timestamp
                 start_ts,       # 10: next_ts - %s::timestamp
                 end_ts,         # 11: next_ts >= %s::timestamp
-                end_ts,         # 12: %s::timestamp - %s::timestamp (first) - FIX: should be end_ts, not start_ts!
+                end_ts,         # 12: %s::timestamp - %s::timestamp (first)
                 start_ts,       # 13: %s::timestamp - %s::timestamp (second)
                 end_ts,         # 14: next_ts < %s::timestamp
                 end_ts,         # 15: next_ts >= %s::timestamp
                 end_ts,         # 16: %s::timestamp - ts
                 end_ts,         # 17: next_ts < %s::timestamp (next_ts)
                 end_ts,         # 18: %s::timestamp (next_ts)
-                start_ts,       # 19: ts > %s::timestamp (WHERE)
-                end_ts,         # 20: ts < %s::timestamp (WHERE)
-                start_ts,       # 21: ts <= %s::timestamp (WHERE OR)
-                start_ts        # 22: next_ts > %s::timestamp (WHERE OR)
+                end_ts,         # 19: ts < %s::timestamp (WHERE - state started before window end)
+                start_ts        # 20: next_ts > %s::timestamp (WHERE - state ended after window start)
             ])
             results = cursor.fetchall()
             cursor.close()
