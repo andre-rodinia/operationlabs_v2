@@ -129,17 +129,33 @@ def calculate_batch_metrics(
             else:
                 print_availability = batch_print['availability'].mean() if 'availability' in batch_print.columns else 0
             
-            # Weighted performance: Σ(performance × uptime) / Σ(uptime)
-            if 'performance' in batch_print.columns and 'uptime_sec' in batch_print.columns and print_uptime > 0:
-                print_performance = weighted_avg(batch_print, 'performance', 'uptime_sec')
+            # Weighted performance (capped): Σ(performance_capped × uptime) / Σ(uptime)
+            # Use performance_capped column (capped at 100%) for batch-level OEE calculations
+            if 'performance_capped' in batch_print.columns and 'uptime_sec' in batch_print.columns and print_uptime > 0:
+                print_performance = weighted_avg(batch_print, 'performance_capped', 'uptime_sec')
+            elif 'performance' in batch_print.columns and 'uptime_sec' in batch_print.columns and print_uptime > 0:
+                # Fallback: cap the original performance at 100% if capped column doesn't exist
+                batch_print_temp = batch_print.copy()
+                batch_print_temp['performance_capped'] = batch_print_temp['performance'].clip(upper=100.0)
+                print_performance = weighted_avg(batch_print_temp, 'performance_capped', 'uptime_sec')
             else:
                 print_performance = batch_print['performance'].mean() if 'performance' in batch_print.columns else 0
+                # Cap at 100% if using mean fallback
+                print_performance = min(print_performance, 100.0)
+            
+            # Weighted performance (actual/uncapped): Σ(performance × uptime) / Σ(uptime)
+            # This shows the actual measured performance for assessment purposes
+            if 'performance' in batch_print.columns and 'uptime_sec' in batch_print.columns and print_uptime > 0:
+                print_performance_actual = weighted_avg(batch_print, 'performance', 'uptime_sec')
+            else:
+                print_performance_actual = batch_print['performance'].mean() if 'performance' in batch_print.columns else 0
         else:
             print_total_time = 0
             print_uptime = 0
             print_downtime = 0
             print_availability = 0
             print_performance = 0
+            print_performance_actual = 0
         
         # Quality from batch-level QC data (calculate from quality_breakdown)
         # Extract numeric batch ID for lookup
@@ -266,7 +282,8 @@ def calculate_batch_metrics(
             'print_job_count': len(batch_print),
             'print_oee': print_oee,
             'print_availability': print_availability,
-            'print_performance': print_performance,
+            'print_performance': print_performance,  # Capped at 100% for OEE calculation
+            'print_performance_actual': print_performance_actual,  # Actual measured performance (uncapped)
             'print_quality': print_quality,
             'print_total_time_sec': print_total_time,
 

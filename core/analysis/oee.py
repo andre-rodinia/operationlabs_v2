@@ -55,6 +55,36 @@ def calculate_print_performance(df: pd.DataFrame) -> pd.Series:
     return pd.Series(performance, index=df.index)
 
 
+def calculate_print_performance_capped(df: pd.DataFrame) -> pd.Series:
+    """
+    Calculate Print performance capped at 100% for batch-level weighted averages.
+    Performance = min((Actual Speed / Nominal Speed) * 100, 100)
+    
+    Args:
+        df: DataFrame with 'speed_actual' and 'speed_nominal' columns
+        
+    Returns:
+        Series with performance percentages capped at 100%
+    """
+    if 'speed_actual' not in df.columns or 'speed_nominal' not in df.columns:
+        logger.warning("Missing speed columns for capped performance calculation, defaulting to 100%")
+        return pd.Series([100.0] * len(df), index=df.index)
+    
+    # Calculate performance
+    performance = np.where(
+        (df['speed_nominal'] > 0) & (df['speed_actual'].notna()),
+        (df['speed_actual'] / df['speed_nominal']) * 100,
+        100.0
+    )
+    
+    # Cap at 100% for batch-level calculations
+    performance_capped = np.clip(performance, 0, 100)
+    
+    logger.info(f"Print performance (capped) calculated: Avg {performance_capped.mean():.1f}%")
+    
+    return pd.Series(performance_capped, index=df.index)
+
+
 def calculate_cut_performance(df: pd.DataFrame) -> pd.Series:
     """
     Calculate Cut performance.
@@ -306,6 +336,8 @@ def calculate_cell_oee(df: pd.DataFrame, cell_type: str) -> pd.DataFrame:
     # Performance (calculated based on cell type)
     if cell_type == 'print':
         result_df['performance'] = calculate_print_performance(result_df)
+        # Add capped performance column for batch-level weighted averages
+        result_df['performance_capped'] = calculate_print_performance_capped(result_df)
     elif cell_type == 'cut':
         result_df['performance'] = calculate_cut_performance(result_df)
     elif cell_type == 'pick':

@@ -7,6 +7,8 @@ import numpy as np
 import logging
 import json
 from typing import List, Optional
+from datetime import timedelta
+from dateutil import parser as dateutil_parser
 from db.connections import get_historian_connection, get_inside_connection
 from config import Config
 
@@ -18,13 +20,15 @@ logger = logging.getLogger(__name__)
 
 def fetch_batches_for_day(day_start: str, day_end: str) -> pd.DataFrame:
     """
-    Discover batches produced on a specific day.
+    Discover batches produced on a specific day with Print, Cut, and Pick job counts.
 
     Strategy:
-    1. Query HISTORIAN for Print1 JobReports in time window
-    2. Extract job IDs from JobReports
-    3. Map job IDs to batch IDs via INSIDE database
-    4. Group by batch_id with aggregated metadata
+    1. Query HISTORIAN for Print JobReports in time window
+    2. Extract job IDs from JobReports and map to batch IDs via INSIDE database
+    3. Query HISTORIAN for Cut JobReports in time window (extended to next day for Cut)
+    4. Query HISTORIAN for Pick JobReports in time window (extended to next day for Pick)
+    5. Match Cut/Pick job_ids to batch_ids via Print job mapping
+    6. Group by batch_id with aggregated metadata for all three cells
 
     Args:
         day_start: ISO format timestamp (start of day)
@@ -33,9 +37,17 @@ def fetch_batches_for_day(day_start: str, day_end: str) -> pd.DataFrame:
     Returns:
         DataFrame with columns:
         - batch_id: Batch identifier
-        - job_count: Number of jobs in batch
-        - first_job_time: Earliest job timestamp
-        - last_job_time: Latest job timestamp
+        - print_jobs: Number of Print jobs in batch
+        - cut_jobs: Number of Cut jobs in batch
+        - pick_jobs: Number of Pick jobs in batch
+        - print_start: Earliest Print job timestamp
+        - print_end: Latest Print job timestamp
+        - cut_start: Earliest Cut job start time (from events)
+        - cut_end: Latest Cut job end time (from events)
+        - pick_start: Earliest Pick job start time (from sheetStart_ts)
+        - pick_end: Latest Pick job end time (from sheetEnd_ts)
+        - first_job_time: Overall earliest job timestamp (for sorting)
+        - last_job_time: Overall latest job timestamp (for sorting)
 
     Edge Cases:
     - No JobReports found: Returns empty DataFrame
@@ -43,6 +55,9 @@ def fetch_batches_for_day(day_start: str, day_end: str) -> pd.DataFrame:
     - Multiple batches in same day: All returned
     """
     try:
+        # Extend time window for Cut and Pick (they may happen next day)
+        day_end_extended = (dateutil_parser.parse(day_end) + timedelta(days=1)).isoformat()
+        
         # Step 1: Query HISTORIAN for Print JobReports
         with get_historian_connection() as historian_conn:
             cursor = historian_conn.cursor()
@@ -60,24 +75,77 @@ def fetch_batches_for_day(day_start: str, day_end: str) -> pd.DataFrame:
             """
 
             cursor.execute(query, (Config.TOPICS['print'], day_start, day_end))
-            job_records = cursor.fetchall()
+            print_records = cursor.fetchall()
+            
+            # Step 2: Query HISTORIAN for Cut JobReports (extended window)
+            # Extract first event (start) and last event (end) from events array
+            query_cut = """
+                SELECT
+                    COALESCE(
+                        (CAST(payload AS jsonb))->>'jobId',
+                        (CAST(payload AS jsonb)->'data'->'ids'->>'jobId')
+                    ) as job_id,
+                    -- First event timestamp (start)
+                    (CAST(payload AS jsonb)->'data'->'events'->0->>'ts') as job_start,
+                    -- Last event timestamp (end) - use array length to get last index
+                    (
+                        CAST(payload AS jsonb)->'data'->'events'->(jsonb_array_length((CAST(payload AS jsonb)->'data'->'events')) - 1)->>'ts'
+                    ) as job_end,
+                    ts as report_time
+                FROM jobs
+                WHERE topic = %s
+                AND ts >= %s::timestamp
+                AND ts < %s::timestamp
+                AND (CAST(payload AS jsonb))->>'state' = 'completed'
+                AND (
+                    (CAST(payload AS jsonb))->>'jobId' IS NOT NULL
+                    OR (CAST(payload AS jsonb)->'data'->'ids'->>'jobId') IS NOT NULL
+                )
+                ORDER BY ts ASC
+            """
+            
+            cursor.execute(query_cut, (Config.TOPICS['cut'], day_start, day_end_extended))
+            cut_records = cursor.fetchall()
+            
+            # Step 3: Query HISTORIAN for Pick JobReports (extended window)
+            query_pick = """
+                SELECT
+                    (CAST(payload AS jsonb))->>'jobId' as job_id,
+                    (CAST(payload AS jsonb)->'data'->'insideSummary'->>'sheetStart_ts') as job_start,
+                    (CAST(payload AS jsonb)->'data'->'insideSummary'->>'sheetEnd_ts') as job_end,
+                    ts as report_time
+                FROM jobs
+                WHERE topic = %s
+                AND ts >= %s::timestamp
+                AND ts < %s::timestamp
+                AND (CAST(payload AS jsonb))->>'jobId' IS NOT NULL
+                ORDER BY ts ASC
+            """
+            
+            cursor.execute(query_pick, (Config.TOPICS['pick'], day_start, day_end_extended))
+            pick_records = cursor.fetchall()
+            
             cursor.close()
 
-        if not job_records:
-            logger.debug(f"No JobReports found for {day_start} to {day_end}")
-            return pd.DataFrame(columns=['batch_id', 'job_count', 'first_job_time', 'last_job_time'])
+        if not print_records:
+            logger.debug(f"No Print JobReports found for {day_start} to {day_end}")
+            return pd.DataFrame(columns=[
+                'batch_id', 'print_jobs', 'cut_jobs', 'pick_jobs',
+                'print_start', 'print_end', 'cut_start', 'cut_end', 'pick_start', 'pick_end',
+                'first_job_time', 'last_job_time'
+            ])
 
-        # Extract job IDs and timestamps
-        job_ids = [row[0] for row in job_records]
-        job_times = {row[0]: row[1] for row in job_records}
+        # Extract Print job IDs and timestamps
+        print_job_ids = [row[0] for row in print_records]
+        print_job_times = {row[0]: row[1] for row in print_records}
 
-        logger.info(f"Found {len(job_ids)} Print JobReports")
+        logger.info(f"Found {len(print_job_ids)} Print JobReports, {len(cut_records)} Cut JobReports, {len(pick_records)} Pick JobReports")
 
-        # Step 2: Map job IDs to batch IDs via INSIDE database
+        # Step 4: Map Print job IDs to batch IDs via INSIDE database
         with get_inside_connection() as inside_conn:
             cursor = inside_conn.cursor()
 
-            placeholders = ','.join(['%s'] * len(job_ids))
+            placeholders = ','.join(['%s'] * len(print_job_ids))
             query = f"""
                 SELECT
                     rg_id as job_id,
@@ -87,45 +155,129 @@ def fetch_batches_for_day(day_start: str, day_end: str) -> pd.DataFrame:
                 AND production_batch_id IS NOT NULL
             """
 
-            cursor.execute(query, job_ids)
+            cursor.execute(query, print_job_ids)
             mapping_records = cursor.fetchall()
             cursor.close()
 
         if not mapping_records:
             logger.warning("No batch mappings found for job IDs")
-            return pd.DataFrame(columns=['batch_id', 'job_count', 'first_job_time', 'last_job_time'])
+            return pd.DataFrame(columns=[
+                'batch_id', 'print_jobs', 'cut_jobs', 'pick_jobs',
+                'print_start', 'print_end', 'cut_start', 'cut_end', 'pick_start', 'pick_end',
+                'first_job_time', 'last_job_time'
+            ])
 
-        # Step 3: Build batch metadata
+        # Create job_id -> batch_id mapping
+        job_to_batch = {job_id: batch_id for job_id, batch_id in mapping_records}
+
+        # Step 5: Build batch metadata for Print
         batch_metadata = {}
         for job_id, batch_id in mapping_records:
             if batch_id not in batch_metadata:
                 batch_metadata[batch_id] = {
-                    'job_ids': [],
-                    'job_times': []
+                    'print_job_ids': [],
+                    'print_times': [],
+                    'cut_job_ids': [],
+                    'cut_starts': [],
+                    'cut_ends': [],
+                    'pick_job_ids': [],
+                    'pick_starts': [],
+                    'pick_ends': []
                 }
-            batch_metadata[batch_id]['job_ids'].append(job_id)
-            if job_id in job_times:
-                batch_metadata[batch_id]['job_times'].append(job_times[job_id])
+            batch_metadata[batch_id]['print_job_ids'].append(job_id)
+            if job_id in print_job_times:
+                batch_metadata[batch_id]['print_times'].append(print_job_times[job_id])
 
-        # Step 4: Aggregate into DataFrame
+        # Step 6: Match Cut jobs to batches via job_id
+        for row in cut_records:
+            job_id = row[0]
+            job_start = row[1]
+            job_end = row[2]
+            if job_id in job_to_batch:
+                batch_id = job_to_batch[job_id]
+                if batch_id in batch_metadata:
+                    batch_metadata[batch_id]['cut_job_ids'].append(job_id)
+                    if job_start:
+                        batch_metadata[batch_id]['cut_starts'].append(job_start)
+                    if job_end:
+                        batch_metadata[batch_id]['cut_ends'].append(job_end)
+
+        # Step 7: Match Pick jobs to batches via job_id
+        for row in pick_records:
+            job_id = row[0]
+            job_start = row[1]
+            job_end = row[2]
+            if job_id in job_to_batch:
+                batch_id = job_to_batch[job_id]
+                if batch_id in batch_metadata:
+                    batch_metadata[batch_id]['pick_job_ids'].append(job_id)
+                    if job_start:
+                        batch_metadata[batch_id]['pick_starts'].append(job_start)
+                    if job_end:
+                        batch_metadata[batch_id]['pick_ends'].append(job_end)
+
+        # Helper function to convert timestamp strings to datetime
+        def parse_timestamp(ts):
+            """Convert timestamp string or datetime to datetime object."""
+            if ts is None:
+                return None
+            if isinstance(ts, pd.Timestamp):
+                return ts.to_pydatetime()
+            if isinstance(ts, str):
+                try:
+                    return dateutil_parser.parse(ts)
+                except (ValueError, TypeError):
+                    return None
+            return ts
+
+        # Step 8: Aggregate into DataFrame
         batch_rows = []
         for batch_id, metadata in batch_metadata.items():
+            # Convert all timestamps to datetime objects for comparison
+            print_times_dt = [parse_timestamp(t) for t in metadata['print_times'] if t is not None]
+            cut_starts_dt = [parse_timestamp(t) for t in metadata['cut_starts'] if t is not None]
+            cut_ends_dt = [parse_timestamp(t) for t in metadata['cut_ends'] if t is not None]
+            pick_starts_dt = [parse_timestamp(t) for t in metadata['pick_starts'] if t is not None]
+            pick_ends_dt = [parse_timestamp(t) for t in metadata['pick_ends'] if t is not None]
+            
+            # Collect all timestamps for overall first/last
+            all_times = []
+            all_times.extend(print_times_dt)
+            all_times.extend(cut_starts_dt)
+            all_times.extend(cut_ends_dt)
+            all_times.extend(pick_starts_dt)
+            all_times.extend(pick_ends_dt)
+            # Filter out None values
+            all_times = [t for t in all_times if t is not None]
+            
             batch_rows.append({
                 'batch_id': batch_id,
-                'job_count': len(metadata['job_ids']),
-                'first_job_time': min(metadata['job_times']) if metadata['job_times'] else None,
-                'last_job_time': max(metadata['job_times']) if metadata['job_times'] else None
+                'print_jobs': len(metadata['print_job_ids']),
+                'cut_jobs': len(metadata['cut_job_ids']),
+                'pick_jobs': len(metadata['pick_job_ids']),
+                'print_start': min(print_times_dt) if print_times_dt else None,
+                'print_end': max(print_times_dt) if print_times_dt else None,
+                'cut_start': min(cut_starts_dt) if cut_starts_dt else None,
+                'cut_end': max(cut_ends_dt) if cut_ends_dt else None,
+                'pick_start': min(pick_starts_dt) if pick_starts_dt else None,
+                'pick_end': max(pick_ends_dt) if pick_ends_dt else None,
+                'first_job_time': min(all_times) if all_times else None,
+                'last_job_time': max(all_times) if all_times else None
             })
 
         batches_df = pd.DataFrame(batch_rows)
         batches_df = batches_df.sort_values('first_job_time')
 
-        logger.info(f"Discovered {len(batches_df)} batches")
+        logger.info(f"Discovered {len(batches_df)} batches with Print/Cut/Pick counts")
         return batches_df
 
     except Exception as e:
         logger.error(f"Error in fetch_batches_for_day: {e}", exc_info=True)
-        return pd.DataFrame(columns=['batch_id', 'job_count', 'first_job_time', 'last_job_time'])
+        return pd.DataFrame(columns=[
+            'batch_id', 'print_jobs', 'cut_jobs', 'pick_jobs',
+            'print_start', 'print_end', 'cut_start', 'cut_end', 'pick_start', 'pick_end',
+            'first_job_time', 'last_job_time'
+        ])
 
 def fetch_job_ids_for_batch(batch_ids: List[str]) -> List[str]:
     """

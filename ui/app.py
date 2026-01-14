@@ -157,16 +157,34 @@ if st.session_state.batches_df is not None and not st.session_state.batches_df.e
 
     batches_df = st.session_state.batches_df
 
-    # Display batch overview
+    # Display batch overview with Print/Cut/Pick counts
+    # Select columns to display
+    display_columns = ['batch_id', 'print_jobs', 'cut_jobs', 'pick_jobs']
+    if 'print_start' in batches_df.columns:
+        display_columns.extend(['print_start', 'print_end'])
+    if 'cut_start' in batches_df.columns:
+        display_columns.extend(['cut_start', 'cut_end'])
+    if 'pick_start' in batches_df.columns:
+        display_columns.extend(['pick_start', 'pick_end'])
+    
+    # Filter to only existing columns
+    display_columns = [col for col in display_columns if col in batches_df.columns]
+    
     st.dataframe(
-        batches_df,
+        batches_df[display_columns],
         use_container_width=True,
         hide_index=True,
         column_config={
-            "batch_id": st.column_config.TextColumn("Batch ID", width="medium"),
-            "job_count": st.column_config.NumberColumn("Jobs", width="small"),
-            "first_job_time": st.column_config.DatetimeColumn("Start Time", width="medium"),
-            "last_job_time": st.column_config.DatetimeColumn("End Time", width="medium")
+            "batch_id": st.column_config.TextColumn("Batch ID", width="small"),
+            "print_jobs": st.column_config.NumberColumn("Print Jobs", width="small"),
+            "cut_jobs": st.column_config.NumberColumn("Cut Jobs", width="small"),
+            "pick_jobs": st.column_config.NumberColumn("Pick Jobs", width="small"),
+            "print_start": st.column_config.DatetimeColumn("Print Start", width="medium"),
+            "print_end": st.column_config.DatetimeColumn("Print End", width="medium"),
+            "cut_start": st.column_config.DatetimeColumn("Cut Start", width="medium"),
+            "cut_end": st.column_config.DatetimeColumn("Cut End", width="medium"),
+            "pick_start": st.column_config.DatetimeColumn("Pick Start", width="medium"),
+            "pick_end": st.column_config.DatetimeColumn("Pick End", width="medium")
         }
     )
 
@@ -315,28 +333,69 @@ if st.session_state.print_df is not None:
 
     st.subheader("📦 Batch-Level OEE Metrics")
 
+    # Add custom CSS to increase font size in the dataframe
+    st.markdown("""
+        <style>
+        /* Target the batch metrics dataframe specifically */
+        div[data-testid="stDataFrame"] table {
+            font-size: 16px !important;
+        }
+        div[data-testid="stDataFrame"] table td {
+            font-size: 16px !important;
+            font-weight: 500 !important;
+        }
+        div[data-testid="stDataFrame"] table th {
+            font-size: 14px !important;
+            font-weight: 600 !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # Select columns for display, including actual performance
+    display_columns = [
+        'batch_id',
+        'print_oee', 'print_availability', 'print_performance', 'print_performance_actual', 'print_quality',
+        'cut_oee', 'cut_availability', 'cut_performance', 'cut_quality',
+        'pick_oee', 'pick_availability', 'pick_performance', 'pick_quality'
+    ]
+    
+    # Filter to only include columns that exist in the DataFrame
+    available_columns = [col for col in display_columns if col in batch_metrics_df.columns]
+    
+    # Create a formatted copy for display with larger, more readable numbers
+    display_df = batch_metrics_df[available_columns].copy()
+    
+    # Format percentage columns to show 1 decimal place with % symbol
+    percentage_columns = [
+        'print_oee', 'print_availability', 'print_performance', 'print_performance_actual', 'print_quality',
+        'cut_oee', 'cut_availability', 'cut_performance', 'cut_quality',
+        'pick_oee', 'pick_availability', 'pick_performance', 'pick_quality'
+    ]
+    
+    for col in percentage_columns:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "")
+    
     st.dataframe(
-        batch_metrics_df[[
-            'batch_id',
-            'print_oee', 'print_availability', 'print_performance', 'print_quality',
-            'cut_oee', 'cut_availability', 'cut_performance', 'cut_quality',
-            'pick_oee', 'pick_availability', 'pick_performance', 'pick_quality'
-        ]].style.format({
-            'print_oee': '{:.2f}%',
-            'print_availability': '{:.2f}%',
-            'print_performance': '{:.2f}%',
-            'print_quality': '{:.2f}%',
-            'cut_oee': '{:.2f}%',
-            'cut_availability': '{:.2f}%',
-            'cut_performance': '{:.2f}%',
-            'cut_quality': '{:.2f}%',
-            'pick_oee': '{:.2f}%',
-            'pick_availability': '{:.2f}%',
-            'pick_performance': '{:.2f}%',
-            'pick_quality': '{:.2f}%'
-        }),
+        display_df,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        column_config={
+            "batch_id": st.column_config.NumberColumn("Batch ID", width="small"),
+            "print_oee": st.column_config.TextColumn("Print OEE", width="medium"),
+            "print_availability": st.column_config.TextColumn("Print Avail.", width="medium"),
+            "print_performance": st.column_config.TextColumn("Print Perf. (Capped)", width="medium"),
+            "print_performance_actual": st.column_config.TextColumn("Print Perf. (Actual)", width="medium"),
+            "print_quality": st.column_config.TextColumn("Print Quality", width="medium"),
+            "cut_oee": st.column_config.TextColumn("Cut OEE", width="medium"),
+            "cut_availability": st.column_config.TextColumn("Cut Avail.", width="medium"),
+            "cut_performance": st.column_config.TextColumn("Cut Perf.", width="medium"),
+            "cut_quality": st.column_config.TextColumn("Cut Quality", width="medium"),
+            "pick_oee": st.column_config.TextColumn("Pick OEE", width="medium"),
+            "pick_availability": st.column_config.TextColumn("Pick Avail.", width="medium"),
+            "pick_performance": st.column_config.TextColumn("Pick Perf.", width="medium"),
+            "pick_quality": st.column_config.TextColumn("Pick Quality", width="medium"),
+        }
     )
 
     # ========================================================================
