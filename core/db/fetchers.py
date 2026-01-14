@@ -3045,9 +3045,8 @@ def fetch_equipment_states_with_durations(
                             %s::timestamp
                     END AS next_ts
                 FROM state_durations
-                WHERE (ts > %s::timestamp AND ts < %s::timestamp)  -- States starting in window
-                   OR (ts <= %s::timestamp AND (next_ts IS NULL OR next_ts > %s::timestamp))  -- State active at window start
-                  AND duration_seconds IS NOT NULL
+                WHERE ((ts > %s::timestamp AND ts < %s::timestamp)  -- States starting in window
+                   OR (ts <= %s::timestamp AND (next_ts IS NULL OR next_ts > %s::timestamp)))  -- State active at window start
                 ORDER BY ts ASC;
             """
             
@@ -3109,7 +3108,10 @@ def fetch_equipment_states_with_durations(
             
             # Ensure duration_seconds is numeric
             df['duration_seconds'] = pd.to_numeric(df['duration_seconds'], errors='coerce').fillna(0.0)
-            
+
+            # Filter out records with zero or negative duration (these represent instantaneous state changes)
+            df = df[df['duration_seconds'] > 0].copy()
+
             # Log raw state summary (before categorization) - this should match user's direct SQL query
             raw_state_summary = df.groupby('state')['duration_seconds'].sum().to_dict()
             total_raw_seconds = sum(raw_state_summary.values())
