@@ -187,21 +187,27 @@ def calculate_hourly_state_breakdown(
             if gap_sec > 0:
                 other_sec += gap_sec
 
-        # Subtract break time from the state durations to avoid double-counting
-        # Break time overlaps with equipment states, so we need to remove it proportionally
-        if break_sec > 0 and (running_sec + idle_sec + fault_sec + blocked_sec + other_sec) > 0:
-            # Calculate the proportion of break to subtract from each state
-            # Subtract proportionally based on each state's share of total time
+        # For visualization: break and states should not overlap
+        # States show equipment behavior during PRODUCTIVE time only
+        # Break shows scheduled break time
+        # Together they sum to 100% of total time
+
+        # Scale down state seconds proportionally to fit productive time
+        productive_sec_actual = total_sec - break_sec
+        if productive_sec_actual > 0 and (running_sec + idle_sec + fault_sec + blocked_sec + other_sec) > 0:
+            # State seconds currently sum to total_sec (including break overlap)
+            # We need them to sum to productive_sec_actual instead
             total_state_sec = running_sec + idle_sec + fault_sec + blocked_sec + other_sec
-            ratio = (total_state_sec - break_sec) / total_state_sec if total_state_sec > 0 else 0
+            scale_factor = productive_sec_actual / total_state_sec
 
-            running_sec = running_sec * ratio
-            idle_sec = idle_sec * ratio
-            fault_sec = fault_sec * ratio
-            blocked_sec = blocked_sec * ratio
-            other_sec = other_sec * ratio
+            running_sec = running_sec * scale_factor
+            idle_sec = idle_sec * scale_factor
+            fault_sec = fault_sec * scale_factor
+            blocked_sec = blocked_sec * scale_factor
+            other_sec = other_sec * scale_factor
 
-        # Calculate percentages - all based on total time for stacked bar visualization
+        # Now calculate percentages based on total time
+        # States have been scaled to productive time, so states + break = total
         if total_sec > 0:
             running_pct = (running_sec / total_sec) * 100
             idle_pct = (idle_sec / total_sec) * 100
