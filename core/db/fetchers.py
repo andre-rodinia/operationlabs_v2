@@ -1223,16 +1223,22 @@ def fetch_robot_equipment_states(
 
             running_time_sec = 0.0
             downtime_sec = 0.0
+            all_states = {}
 
             for state, duration in results:
                 duration_float = float(duration) if duration else 0.0
+                all_states[state] = duration_float
+
                 if state == 'running':
                     running_time_sec += duration_float
                 elif state == 'down':
                     # Only 'down' state counts as downtime (machine failure/unavailable)
                     # Idle, blocked, etc. are NOT counted (machine is available but not producing)
                     downtime_sec += duration_float
-            
+
+            logger.info(f"Equipment states for {cell}: {all_states}")
+            logger.info(f"  Running: {running_time_sec:.1f}s, Down: {downtime_sec:.1f}s")
+
             return {
                 'running_time_sec': running_time_sec,
                 'downtime_sec': downtime_sec
