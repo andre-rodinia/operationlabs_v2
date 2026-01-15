@@ -1198,26 +1198,41 @@ def fetch_robot_equipment_states(
             cursor = conn.cursor()
             
             query = """
-                WITH state_changes AS (
+                WITH relevant_states AS (
+                    -- Get the last state before window start + all states in window
+                    SELECT * FROM (
+                        SELECT ts, cell, state
+                        FROM equipment
+                        WHERE cell = %s AND ts <= %s::timestamptz
+                        ORDER BY ts DESC
+                        LIMIT 1
+                    ) AS before_window
+                    UNION ALL
+                    SELECT ts, cell, state
+                    FROM equipment
+                    WHERE cell = %s AND ts > %s::timestamptz AND ts < %s::timestamptz
+                ),
+                state_changes AS (
                     SELECT
                         ts,
-                        cell,
                         state,
                         LEAD(ts) OVER (ORDER BY ts ASC) AS next_ts
-                    FROM equipment e
-                    WHERE e.cell = %s
-                      AND e.ts >= %s::timestamp
-                      AND e.ts <= %s::timestamp
+                    FROM relevant_states
+                    ORDER BY ts ASC
                 )
                 SELECT
                     state,
-                    SUM(EXTRACT(EPOCH FROM (next_ts - ts))) AS duration_seconds
+                    SUM(EXTRACT(EPOCH FROM (
+                        LEAST(COALESCE(next_ts, %s::timestamptz), %s::timestamptz) -
+                        GREATEST(ts, %s::timestamptz)
+                    ))) AS duration_seconds
                 FROM state_changes
-                WHERE next_ts IS NOT NULL
+                WHERE ts < %s::timestamptz
+                  AND (next_ts IS NULL OR next_ts > %s::timestamptz)
                 GROUP BY state;
             """
 
-            cursor.execute(query, [cell, start_ts, end_ts])
+            cursor.execute(query, [cell, start_ts, cell, start_ts, end_ts, end_ts, end_ts, start_ts, end_ts, start_ts])
             results = cursor.fetchall()
             cursor.close()
 
