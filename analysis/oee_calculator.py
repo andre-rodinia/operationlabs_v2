@@ -281,6 +281,12 @@ def calculate_batch_metrics(
         if pick_start_ts and pick_end_ts:
             logger.info(f"  ✅ Got time window: {pick_start_ts} to {pick_end_ts}")
 
+            # Convert timestamps to datetime if they're strings
+            if isinstance(pick_start_ts, str):
+                pick_start_ts = pd.to_datetime(pick_start_ts)
+            if isinstance(pick_end_ts, str):
+                pick_end_ts = pd.to_datetime(pick_end_ts)
+
             # Calculate total time from time window (like Print/Cut use job runtime)
             pick_total_time = (pick_end_ts - pick_start_ts).total_seconds()
             logger.info(f"  Batch time window duration: {pick_total_time:.1f}s ({pick_total_time/3600:.2f}h)")
