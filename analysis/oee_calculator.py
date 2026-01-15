@@ -230,8 +230,6 @@ def calculate_batch_metrics(
                         cut_quality = ((total - defects) / total) * 100
         
         # Pick metrics - use equipment state data for availability
-        if not batch_pick.empty:
-        
         # Get batch time window from Pick JobReports (sheetStart_ts to sheetEnd_ts)
         # Use the already-filtered batch_pick if available (it's already filtered by normalized batch_id)
         if not batch_pick.empty:
