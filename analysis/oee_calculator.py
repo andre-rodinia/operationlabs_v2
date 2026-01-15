@@ -287,7 +287,7 @@ def calculate_batch_metrics(
             if isinstance(pick_end_ts, str):
                 pick_end_ts = pd.to_datetime(pick_end_ts)
 
-            # Calculate total time from time window (like Print/Cut use job runtime)
+            # Calculate total time from time window for daily metrics (like Print/Cut use job runtime)
             pick_total_time = (pick_end_ts - pick_start_ts).total_seconds()
             logger.info(f"  Batch time window duration: {pick_total_time:.1f}s ({pick_total_time/3600:.2f}h)")
 
@@ -299,16 +299,17 @@ def calculate_batch_metrics(
             logger.info(f"  Equipment states returned: {equipment_states}")
             logger.info(f"  Running time: {running_time_sec:.1f}s, Downtime from states: {downtime_sec:.1f}s")
 
-            # Calculate availability: running time / total batch window
-            # (Downtime is everything else: idle, faults, waiting, gaps in telemetry)
-            if pick_total_time > 0:
-                pick_availability = (running_time_sec / pick_total_time) * 100
-                logger.info(f"  ✅ Calculated availability: {pick_availability:.2f}% = ({running_time_sec:.1f}s / {pick_total_time:.1f}s) × 100")
+            # Calculate availability using equipment states only (for batch OEE)
+            # This keeps batch OEE calculation consistent with the original method
+            total_time_for_availability = running_time_sec + downtime_sec
+            if total_time_for_availability > 0:
+                pick_availability = (running_time_sec / total_time_for_availability) * 100
+                logger.info(f"  ✅ Calculated availability: {pick_availability:.2f}% = ({running_time_sec:.1f}s / {total_time_for_availability:.1f}s) × 100")
             else:
                 pick_availability = 0
-                logger.warning(f"  ⚠️ Total time is 0, setting availability to 0%")
+                logger.warning(f"  ⚠️ Total time for availability is 0, setting availability to 0%")
 
-            logger.info(f"  Final: availability={pick_availability:.2f}%, total_time={pick_total_time:.1f}s ({pick_total_time/3600:.2f}h)")
+            logger.info(f"  Final: availability={pick_availability:.2f}%, total_time_for_daily={pick_total_time:.1f}s ({pick_total_time/3600:.2f}h)")
         else:
             # Fallback to job-level data if time window not available
             logger.warning(f"  ❌ Could not get time window (start={pick_start_ts}, end={pick_end_ts}), using job-level data fallback")
