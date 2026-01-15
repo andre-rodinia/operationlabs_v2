@@ -1228,8 +1228,9 @@ def fetch_robot_equipment_states(
                 duration_float = float(duration) if duration else 0.0
                 if state == 'running':
                     running_time_sec += duration_float
-                else:
-                    # All non-running states count as downtime (idle, down, blocked, etc.)
+                elif state == 'down':
+                    # Only 'down' state counts as downtime (machine failure/unavailable)
+                    # Idle, blocked, etc. are NOT counted (machine is available but not producing)
                     downtime_sec += duration_float
             
             return {
