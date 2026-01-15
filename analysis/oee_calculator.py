@@ -51,10 +51,8 @@ def calculate_break_overlap_per_cell(
     if overlap_end > overlap_start:
         overlap_seconds = (overlap_end - overlap_start).total_seconds()
         overlap_hours = overlap_seconds / 3600.0
-        logger.debug(f"Break overlap: {overlap_hours:.2f}h ({overlap_start} to {overlap_end})")
         return overlap_hours
 
-    logger.debug("No break overlap with cell production window")
     return 0.0
 
 def calculate_batch_metrics(
@@ -104,51 +102,28 @@ def calculate_batch_metrics(
         batch_id_str = str(batch_id)
         batch_id_clean = normalize_batch_id(batch_id_str)
         
-        logger.info(f"Filtering for batch_id: '{batch_id}' (normalized: '{batch_id_clean}')")
-        
         # Try multiple formats for matching
         batch_print = pd.DataFrame()
         batch_cut = pd.DataFrame()
         batch_pick = pd.DataFrame()
-        
+
         if not print_df.empty and 'batch_id' in print_df.columns:
-            # Try exact match first
             batch_print = print_df[print_df['batch_id'] == batch_id]
             if batch_print.empty:
-                # Try matching cleaned version
                 print_df_normalized = print_df['batch_id'].apply(normalize_batch_id)
                 batch_print = print_df[print_df_normalized == batch_id_clean]
-            logger.debug(f"  Print: found {len(batch_print)} jobs (exact match: {len(print_df[print_df['batch_id'] == batch_id])}, normalized match: {len(batch_print)})")
-        
+
         if not cut_df.empty and 'batch_id' in cut_df.columns:
             batch_cut = cut_df[cut_df['batch_id'] == batch_id]
             if batch_cut.empty:
                 cut_df_normalized = cut_df['batch_id'].apply(normalize_batch_id)
                 batch_cut = cut_df[cut_df_normalized == batch_id_clean]
-            logger.debug(f"  Cut: found {len(batch_cut)} jobs")
-        
+
         if not pick_df.empty and 'batch_id' in pick_df.columns:
-            logger.debug(f"  Pick: pick_df has {len(pick_df)} rows, batch_id column exists")
-            logger.debug(f"  Pick: Unique batch_ids in pick_df: {pick_df['batch_id'].unique().tolist()}")
-            logger.debug(f"  Pick: Looking for batch_id='{batch_id}' or normalized='{batch_id_clean}'")
-            
-            # Try exact match first
             batch_pick = pick_df[pick_df['batch_id'] == batch_id]
-            logger.debug(f"  Pick: Exact match found {len(batch_pick)} jobs")
-            
             if batch_pick.empty:
-                # Try matching cleaned version
                 pick_df_normalized = pick_df['batch_id'].apply(normalize_batch_id)
-                logger.debug(f"  Pick: Normalized batch_ids: {pick_df_normalized.unique().tolist()}")
-                logger.debug(f"  Pick: Looking for normalized='{batch_id_clean}'")
                 batch_pick = pick_df[pick_df_normalized == batch_id_clean]
-                logger.debug(f"  Pick: Normalized match found {len(batch_pick)} jobs")
-                if len(batch_pick) > 0:
-                    logger.debug(f"  Pick: batch_ids in filtered data: {batch_pick['batch_id'].unique().tolist()}")
-            else:
-                logger.debug(f"  Pick: Using exact match, found {len(batch_pick)} jobs")
-        
-        logger.info(f"Batch {batch_id}: Print={len(batch_print)} jobs, Cut={len(batch_cut)} jobs, Pick={len(batch_pick)} jobs")
 
         # Helper function to calculate weighted average
         def weighted_avg(df, value_col, weight_col):
@@ -164,11 +139,9 @@ def calculate_batch_metrics(
         
         # Print metrics
         if not batch_print.empty:
-            logger.debug(f"Batch {batch_id} Print: {len(batch_print)} jobs, columns: {batch_print.columns.tolist()}")
             print_total_time = batch_print['total_time_sec'].sum() if 'total_time_sec' in batch_print.columns else 0
             print_uptime = batch_print['uptime_sec'].sum() if 'uptime_sec' in batch_print.columns else 0
             print_downtime = batch_print['downtime_sec'].sum() if 'downtime_sec' in batch_print.columns else 0
-            logger.debug(f"Batch {batch_id} Print: total_time={print_total_time}, uptime={print_uptime}, downtime={print_downtime}")
             
             # Weighted availability: Σ(availability × total_time) / Σ(total_time)
             if 'availability' in batch_print.columns and 'total_time_sec' in batch_print.columns:
@@ -219,15 +192,12 @@ def calculate_batch_metrics(
                     defects = batch_qc['print_defects'].iloc[0]
                     if total > 0:
                         print_quality = ((total - defects) / total) * 100
-                        logger.debug(f"Batch {batch_id}: Print quality = ({total} - {defects}) / {total} = {print_quality:.2f}%")
         
         # Cut metrics
         if not batch_cut.empty:
-            logger.debug(f"Batch {batch_id} Cut: {len(batch_cut)} jobs, columns: {batch_cut.columns.tolist()}")
             cut_total_time = batch_cut['total_time_sec'].sum() if 'total_time_sec' in batch_cut.columns else 0
             cut_uptime = batch_cut['uptime_sec'].sum() if 'uptime_sec' in batch_cut.columns else 0
             cut_downtime = batch_cut['downtime_sec'].sum() if 'downtime_sec' in batch_cut.columns else 0
-            logger.debug(f"Batch {batch_id} Cut: total_time={cut_total_time}, uptime={cut_uptime}, downtime={cut_downtime}")
             
             # Weighted availability: Σ(availability × total_time) / Σ(total_time)
             if 'availability' in batch_cut.columns and 'total_time_sec' in batch_cut.columns:
@@ -258,15 +228,9 @@ def calculate_batch_metrics(
                     defects = batch_qc['cut_defects'].iloc[0]
                     if total > 0:
                         cut_quality = ((total - defects) / total) * 100
-                        logger.debug(f"Batch {batch_id}: Cut quality = ({total} - {defects}) / {total} = {cut_quality:.2f}%")
         
         # Pick metrics - use equipment state data for availability
-        logger.info(f"🤖 Calculating Pick metrics for batch {batch_id}")
-        logger.info(f"  batch_pick empty: {batch_pick.empty}")
         if not batch_pick.empty:
-            logger.info(f"  batch_pick columns: {batch_pick.columns.tolist()}")
-            logger.info(f"  batch_pick shape: {batch_pick.shape}")
-            logger.info(f"  batch_pick batch_ids: {batch_pick['batch_id'].unique().tolist() if 'batch_id' in batch_pick.columns else 'N/A'}")
         
         # Get batch time window from Pick JobReports (sheetStart_ts to sheetEnd_ts)
         # Use the already-filtered batch_pick if available (it's already filtered by normalized batch_id)
@@ -279,7 +243,6 @@ def calculate_batch_metrics(
             pick_start_ts, pick_end_ts = get_batch_pick_time_window(pick_df, batch_id)
         
         if pick_start_ts and pick_end_ts:
-            logger.info(f"  ✅ Got time window: {pick_start_ts} to {pick_end_ts}")
 
             # Convert timestamps to datetime if they're strings
             if isinstance(pick_start_ts, str):
@@ -289,45 +252,35 @@ def calculate_batch_metrics(
 
             # Calculate total time from time window for daily metrics (like Print/Cut use job runtime)
             pick_total_time = (pick_end_ts - pick_start_ts).total_seconds()
-            logger.info(f"  Batch time window duration: {pick_total_time:.1f}s ({pick_total_time/3600:.2f}h)")
 
             # Query equipment states for the batch time window
             equipment_states = fetch_robot_equipment_states('Pick1', pick_start_ts, pick_end_ts)
             running_time_sec = equipment_states['running_time_sec']
             downtime_sec = equipment_states['downtime_sec']
 
-            logger.info(f"  Equipment states returned: {equipment_states}")
-            logger.info(f"  Running time: {running_time_sec:.1f}s, Downtime from states: {downtime_sec:.1f}s")
-
             # Calculate availability using equipment states only (for batch OEE)
             # This keeps batch OEE calculation consistent with the original method
             total_time_for_availability = running_time_sec + downtime_sec
             if total_time_for_availability > 0:
                 pick_availability = (running_time_sec / total_time_for_availability) * 100
-                logger.info(f"  ✅ Calculated availability: {pick_availability:.2f}% = ({running_time_sec:.1f}s / {total_time_for_availability:.1f}s) × 100")
             else:
                 pick_availability = 0
-                logger.warning(f"  ⚠️ Total time for availability is 0, setting availability to 0%")
-
-            logger.info(f"  Final: availability={pick_availability:.2f}%, total_time_for_daily={pick_total_time:.1f}s ({pick_total_time/3600:.2f}h)")
+                logger.warning(f"Total time for availability is 0 for batch {batch_id}")
         else:
             # Fallback to job-level data if time window not available
-            logger.warning(f"  ❌ Could not get time window (start={pick_start_ts}, end={pick_end_ts}), using job-level data fallback")
+            logger.warning(f"Could not get time window for batch {batch_id}, using job-level data fallback")
             pick_total_time = batch_pick['total_time_sec'].sum() if not batch_pick.empty and 'total_time_sec' in batch_pick.columns else 0
             pick_uptime = batch_pick['uptime_sec'].sum() if not batch_pick.empty and 'uptime_sec' in batch_pick.columns else 0
             pick_availability = weighted_avg(batch_pick, 'availability', 'total_time_sec') if not batch_pick.empty and 'total_time_sec' in batch_pick.columns else 0
-            logger.info(f"  Fallback: availability={pick_availability:.2f}%, total_time={pick_total_time:.1f}s")
         
         # Performance is always 100% for Pick
         pick_performance = 100.0
         
         # Quality from batch-level QC data or job-level average (Pick uses job-level quality)
         pick_quality = batch_pick['quality'].mean() if not batch_pick.empty else 0
-        logger.info(f"  Pick quality: {pick_quality:.2f}%")
         
         # Calculate OEE
         pick_oee = (pick_availability / 100) * (pick_performance / 100) * (pick_quality / 100) * 100
-        logger.info(f"  ✅ Final Pick OEE: {pick_oee:.2f}% = ({pick_availability:.2f}% × {pick_performance:.2f}% × {pick_quality:.2f}%) / 10000")
         
         # Calculate OEE from weighted components
         print_oee = (print_availability / 100) * (print_performance / 100) * (print_quality / 100) * 100
@@ -407,7 +360,6 @@ def calculate_daily_metrics(
         if total_time == 0:
             return 0.0
         weighted = (df[oee_col] * df[time_col]).sum() / total_time
-        logger.debug(f"Weighted {oee_col}: {weighted:.2f}% (vs simple mean: {df[oee_col].mean():.2f}%)")
         return weighted
 
     # Calculate total production time (sum across batches)
@@ -421,33 +373,27 @@ def calculate_daily_metrics(
     pick_break_overlap = 0.0
 
     if break_start and break_end and batches_df is not None and not batches_df.empty:
-        logger.info(f"Calculating break overlap for break window: {break_start} to {break_end}")
 
         # Extract cell timestamps from batches_df
         if 'print_start' in batches_df.columns and 'print_end' in batches_df.columns:
             print_start = batches_df['print_start'].min()
             print_end = batches_df['print_end'].max()
             print_break_overlap = calculate_break_overlap_per_cell(print_start, print_end, break_start, break_end)
-            logger.info(f"Print break overlap: {print_break_overlap:.2f}h")
 
         if 'cut_start' in batches_df.columns and 'cut_end' in batches_df.columns:
             cut_start = batches_df['cut_start'].min()
             cut_end = batches_df['cut_end'].max()
             cut_break_overlap = calculate_break_overlap_per_cell(cut_start, cut_end, break_start, break_end)
-            logger.info(f"Cut break overlap: {cut_break_overlap:.2f}h")
 
         if 'pick_start' in batches_df.columns and 'pick_end' in batches_df.columns:
             pick_start = batches_df['pick_start'].min()
             pick_end = batches_df['pick_end'].max()
             pick_break_overlap = calculate_break_overlap_per_cell(pick_start, pick_end, break_start, break_end)
-            logger.info(f"Pick break overlap: {pick_break_overlap:.2f}h")
 
     # Calculate active production hours (production minus break overlap)
     print_active_hours = max(0, print_production_hours - print_break_overlap)
     cut_active_hours = max(0, cut_production_hours - cut_break_overlap)
     pick_active_hours = max(0, pick_production_hours - pick_break_overlap)
-
-    logger.info(f"Active production hours: Print={print_active_hours:.2f}h, Cut={cut_active_hours:.2f}h, Pick={pick_active_hours:.2f}h")
 
     # Calculate utilization (active hours vs scheduled hours)
     print_utilization = (print_active_hours / scheduled_hours * 100) if scheduled_hours > 0 else 0

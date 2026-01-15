@@ -803,93 +803,42 @@ def fetch_pick_jobreports_by_jobs(job_ids: List[str], time_window: Optional[Cell
         # Use secure query builder
         query, parameters = secure_query_builder.build_pick_data_by_job_query(job_ids)
         
-        logger.info(f"Executing Pick query for {len(job_ids)} jobs")
-        logger.debug(f"Sample job IDs: {job_ids[:3] if len(job_ids) > 0 else 'none'}")
-        
         with get_historian_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(query, parameters)
             columns = [desc[0] for desc in cursor.description]
             results = cursor.fetchall()
             cursor.close()
-        
-        logger.info(f"Query returned {len(results)} rows")
-        logger.info(f"Query columns: {columns}")
-        
-        # Debug: Check sheet_start_ts and sheet_end_ts in raw results
-        if results and len(results) > 0:
-            sheet_start_idx = columns.index('sheet_start_ts') if 'sheet_start_ts' in columns else -1
-            sheet_end_idx = columns.index('sheet_end_ts') if 'sheet_end_ts' in columns else -1
-            if sheet_start_idx >= 0 and sheet_end_idx >= 0:
-                sample_record = results[0]
-                logger.info(f"🔍 Debug: Sample record sheet_start_ts: {sample_record[sheet_start_idx]} (type: {type(sample_record[sheet_start_idx])})")
-                logger.info(f"🔍 Debug: Sample record sheet_end_ts: {sample_record[sheet_end_idx]} (type: {type(sample_record[sheet_end_idx])})")
-                # Count non-null values
-                non_null_start = sum(1 for r in results if r[sheet_start_idx] is not None and str(r[sheet_start_idx]).strip() != '')
-                non_null_end = sum(1 for r in results if r[sheet_end_idx] is not None and str(r[sheet_end_idx]).strip() != '')
-                logger.info(f"🔍 Debug: Non-null sheet_start_ts in raw results: {non_null_start}/{len(results)}")
-                logger.info(f"🔍 Debug: Non-null sheet_end_ts in raw results: {non_null_end}/{len(results)}")
-        
+
         # Parse results
         if not results:
             logger.warning(f"No Pick JobReports found for {len(job_ids)} jobs")
-            logger.debug(f"Query executed with {len(job_ids)} job IDs: {job_ids[:5]}...")  # Log first 5
-            logger.debug(f"Query topic: {parameters[0] if len(parameters) > 0 else 'N/A'}")
             return pd.DataFrame()
-        
+
         df = pd.DataFrame(results, columns=columns)
-        
+
         if df.empty:
-            logger.warning(f"DataFrame is empty after parsing {len(results)} results")
             return pd.DataFrame()
-        
-        # Log sample of what we got
-        if len(df) > 0:
-            sample_row = df.iloc[0].to_dict()
-            logger.info(f"Sample row keys: {list(sample_row.keys())}")
-            # Check if our expected columns exist
-            expected_cols = ['components_completed', 'components_failed', 'components_state_unknown', 'sheetIndex']
-            for col in expected_cols:
-                if col in sample_row:
-                    val = sample_row[col]
-                    val_type = type(val).__name__
-                    if val is None:
-                        val_preview = 'None'
-                    elif isinstance(val, (list, dict)):
-                        val_preview = f"{val_type} with {len(val)} items" if hasattr(val, '__len__') else val_type
-                    else:
-                        val_preview = str(val)[:100]
-                    logger.info(f"  {col}: type={val_type}, preview={val_preview}")
-                else:
-                    logger.warning(f"  {col}: NOT FOUND in columns!")
-        
+
         # Check if we have valid job_id values (not all NULL)
         if 'job_id' in df.columns:
             valid_jobs = df['job_id'].notna().sum()
-            logger.info(f"Found {valid_jobs} rows with valid job_id out of {len(df)} total rows")
             if valid_jobs == 0:
                 logger.error("All job_id values are NULL - query may not be matching correctly")
-                logger.error(f"Sample row data: {df.iloc[0].to_dict() if len(df) > 0 else 'No rows'}")
-                logger.error(f"Columns in result: {df.columns.tolist()}")
                 return pd.DataFrame()
             # Filter out rows with NULL job_id
             df = df[df['job_id'].notna()].copy()
-            logger.info(f"Filtered to {len(df)} rows with valid job_id")
         else:
-            logger.error(f"job_id column not found in results! Columns: {df.columns.tolist()}")
+            logger.error(f"job_id column not found in results")
             return pd.DataFrame()
-        
+
         if df.empty:
-            logger.warning(f"No Pick JobReports found for {len(job_ids)} jobs")
             return pd.DataFrame()
-        
+
         # Deduplicate: If multiple reports for same job_id, keep the latest (by ts)
         if 'job_id' in df.columns and 'ts' in df.columns:
-            initial_count = len(df)
             df = df.sort_values('ts', ascending=False).drop_duplicates(subset=['job_id'], keep='first')
             df = df.sort_values('ts', ascending=True)  # Re-sort chronologically
-            if len(df) < initial_count:
-                logger.info(f"Deduplicated Pick reports: {initial_count} -> {len(df)} (kept latest per job_id)")
         
         logger.info(f"Found {len(df)} Pick JobReports for {df['job_id'].nunique()} unique jobs")
         
@@ -940,7 +889,6 @@ def fetch_pick_jobreports_by_jobs(job_ids: List[str], time_window: Optional[Cell
                                             pass
                     except (json.JSONDecodeError, TypeError, AttributeError) as e:
                         logger.warning(f"Error parsing components_completed for job {row.get('job_id')}: {e}")
-                        logger.debug(f"  components_completed type: {type(components_completed)}, value: {str(components_completed)[:200]}")
                 
                 # Parse componentsFailed array
                 if components_failed is not None and not (isinstance(components_failed, float) and pd.isna(components_failed)):
@@ -952,8 +900,8 @@ def fetch_pick_jobreports_by_jobs(job_ids: List[str], time_window: Optional[Cell
                         
                         if isinstance(failed_list, list):
                             failed = len(failed_list)
-                    except (json.JSONDecodeError, TypeError, AttributeError) as e:
-                        logger.debug(f"Error parsing components_failed for job {row.get('job_id')}: {e}")
+                    except (json.JSONDecodeError, TypeError, AttributeError):
+                        pass  # Fail silently for components_failed parsing
                 
                 # Don't parse componentsStateUnknown array (may be corrupted)
                 # Instead, calculate ignored as: order_count - completed - failed
@@ -963,7 +911,6 @@ def fetch_pick_jobreports_by_jobs(job_ids: List[str], time_window: Optional[Cell
                     if successful_picks > 0:
                         completed = int(successful_picks)
                         failed = int(total_picks - successful_picks) if total_picks >= successful_picks else 0
-                        logger.debug(f"Using metrics fallback for job {row.get('job_id')}: completed={completed}, failed={failed}")
                 
                 # Calculate ignored components as: order_count - completed - failed
                 # Get order_count from component_count or total_picks
@@ -997,75 +944,28 @@ def fetch_pick_jobreports_by_jobs(job_ids: List[str], time_window: Optional[Cell
                     'avg_component_pick_time_s': 0.0
                 })
         
-        logger.info(f"Parsed component metrics for {len(component_metrics)} rows")
-        if len(component_metrics) > 0:
-            logger.info(f"Sample metrics - completed: {component_metrics[0].get('components_completed')}, failed: {component_metrics[0].get('components_failed')}, avg_time: {component_metrics[0].get('avg_component_pick_time_s')}")
-        
         # Add component metrics to dataframe
         if len(component_metrics) != len(df):
             logger.error(f"Mismatch: component_metrics has {len(component_metrics)} items but df has {len(df)} rows")
-            logger.error(f"This will cause concat to fail. Returning empty DataFrame.")
             return pd.DataFrame()
-        
+
         try:
             # Drop the raw JSON array columns from SQL query before concatenating
-            # We'll use the parsed integer counts from component_metrics instead
             columns_to_drop = ['components_completed', 'components_failed', 'components_state_unknown', 'components_events']
             existing_cols_to_drop = [col for col in columns_to_drop if col in df.columns]
             if existing_cols_to_drop:
-                logger.info(f"Dropping raw JSON array columns before concat: {existing_cols_to_drop}")
                 df = df.drop(columns=existing_cols_to_drop)
-            
+
             metrics_df = pd.DataFrame(component_metrics)
             df = pd.concat([df.reset_index(drop=True), metrics_df], axis=1)
-            logger.info(f"Successfully merged component metrics: df now has {len(df)} rows and {len(df.columns)} columns")
-            
-            # Check for duplicate column names (shouldn't happen now, but just in case)
+
+            # Check for duplicate column names
             duplicate_cols = df.columns[df.columns.duplicated()].tolist()
             if duplicate_cols:
-                logger.warning(f"Found duplicate column names after concat: {duplicate_cols}")
-                logger.warning(f"All columns: {df.columns.tolist()}")
-                # Keep only the first occurrence of each duplicate column
                 df = df.loc[:, ~df.columns.duplicated()]
-                logger.info(f"Removed duplicate columns. Now has {len(df.columns)} columns: {df.columns.tolist()}")
         except Exception as e:
             logger.error(f"Error concatenating component metrics: {e}", exc_info=True)
-            logger.error(f"df shape: {df.shape if not df.empty else 'empty'}, component_metrics length: {len(component_metrics)}")
-            if len(component_metrics) > 0:
-                logger.error(f"Sample component_metrics item: {component_metrics[0]}")
             return pd.DataFrame()
-        
-        # Rename and calculate derived metrics
-        # Log before rename to see what columns we have
-        logger.info(f"Columns before rename: {df.columns.tolist()}")
-        if 'sheetIndex' in df.columns:
-            logger.info(f"sheetIndex column exists before rename. Sample values: {df['sheetIndex'].head(3).tolist()}")
-            logger.info(f"sheetIndex non-null count: {df['sheetIndex'].notna().sum()}/{len(df)}")
-        
-        # Check for sheet timing columns before rename
-        if 'sheet_start_ts' in df.columns:
-            non_null_count = df['sheet_start_ts'].notna().sum()
-            logger.info(f"sheet_start_ts found! Non-null count: {non_null_count}/{len(df)}")
-            if non_null_count > 0:
-                logger.info(f"  Sample sheet_start_ts values: {df[df['sheet_start_ts'].notna()]['sheet_start_ts'].head(3).tolist()}")
-            else:
-                logger.warning(f"  ⚠️ All sheet_start_ts values are NULL - JSON path may be incorrect")
-                # Try to inspect the actual JSON structure for debugging
-                if len(df) > 0:
-                    sample_job_id = df.iloc[0]['job_id'] if 'job_id' in df.columns else 'unknown'
-                    logger.warning(f"  Checking JSON structure for job {sample_job_id}...")
-        else:
-            logger.warning(f"sheet_start_ts NOT found in columns: {df.columns.tolist()}")
-        
-        if 'sheet_end_ts' in df.columns:
-            non_null_count = df['sheet_end_ts'].notna().sum()
-            logger.info(f"sheet_end_ts found! Non-null count: {non_null_count}/{len(df)}")
-            if non_null_count > 0:
-                logger.info(f"  Sample sheet_end_ts values: {df[df['sheet_end_ts'].notna()]['sheet_end_ts'].head(3).tolist()}")
-            else:
-                logger.warning(f"  ⚠️ All sheet_end_ts values are NULL - JSON path may be incorrect")
-        else:
-            logger.warning(f"sheet_end_ts NOT found in columns: {df.columns.tolist()}")
         
         df = df.rename(columns={
             'batchId': 'batch_id',
@@ -1132,7 +1032,6 @@ def fetch_pick_jobreports_by_jobs(job_ids: List[str], time_window: Optional[Cell
             df['sheet_index'] = pd.to_numeric(df['sheet_index'], errors='coerce')
             # Convert NaN to None for consistency with other cells
             df['sheet_index'] = df['sheet_index'].where(pd.notna(df['sheet_index']), None)
-            logger.info(f"sheet_index initialized (will be merged from Print): {df['sheet_index'].notna().sum()}/{len(df)} rows have values")
         
         # Calculate success_rate and failure_rate (for internal use, not displayed)
         total_attempts = df['total_attempts']
@@ -1190,35 +1089,13 @@ def fetch_pick_jobreports_by_jobs(job_ids: List[str], time_window: Optional[Cell
             else:
                 logger.warning("Cannot apply time window filter: 'ts' column not found")
         
-        logger.info(f"Fetched {len(df)} Pick JobReports for {len(job_ids)} requested jobs")
-        if not df.empty:
-            logger.info(f"  Unique job IDs found: {df['job_id'].nunique()}")
-            logger.info(f"  Sample job IDs: {df['job_id'].head(3).tolist()}")
-            logger.info(f"  Columns: {df.columns.tolist()}")
-            if len(df) > 0:
-                logger.info(f"  Sample data - first row job_id: {df.iloc[0]['job_id']}")
-                if 'components_completed' in df.columns:
-                    logger.info(f"  Components completed (sum): {df['components_completed'].sum()}")
-                    logger.info(f"  Components failed (sum): {df['components_failed'].sum()}")
-                    logger.info(f"  Components ignored (sum): {df['components_ignored'].sum()}")
-                    logger.info(f"  Avg pick time (mean): {df['avg_component_pick_time_s'].mean():.2f}s")
-                else:
-                    logger.error(f"  components_completed column missing! Available: {df.columns.tolist()}")
-        else:
-            logger.warning(f"DataFrame is empty - no Pick data to return")
-        
-        # Final validation before returning
         if df.empty:
-            logger.error("RETURNING EMPTY DATAFRAME - Pick data fetch failed")
-        else:
-            logger.info(f"RETURNING DATAFRAME with {len(df)} rows and columns: {df.columns.tolist()}")
+            logger.warning(f"No Pick JobReports found for {len(job_ids)} jobs")
         
         return df
         
     except Exception as e:
         logger.error(f"Error in fetch_pick_jobreports_by_jobs: {e}", exc_info=True)
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
         return pd.DataFrame()
 
 def get_batch_pick_time_window(pick_df: pd.DataFrame, batch_id: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1232,123 +1109,65 @@ def get_batch_pick_time_window(pick_df: pd.DataFrame, batch_id: str) -> Tuple[Op
     Returns:
         Tuple of (start_timestamp, end_timestamp) or (None, None) if no data
     """
-    logger.info(f"🔍 Getting batch time window for batch {batch_id}")
-    logger.info(f"  pick_df empty: {pick_df.empty}, columns: {pick_df.columns.tolist() if not pick_df.empty else 'N/A'}")
-    
     if pick_df.empty:
-        logger.warning(f"  ❌ pick_df is empty for batch {batch_id}")
+        logger.warning(f"No Pick data for batch {batch_id}")
         return None, None
-    
+
     if 'batch_id' not in pick_df.columns:
-        logger.warning(f"  ❌ 'batch_id' column not found in pick_df. Available columns: {pick_df.columns.tolist()}")
+        logger.warning(f"'batch_id' column not found in pick_df")
         return None, None
     
-    # Check if DataFrame is already filtered (all rows have same batch_id)
-    # If so, skip filtering and use directly
+    # Filter by batch_id with normalization
     if 'batch_id' in pick_df.columns and len(pick_df) > 0:
         unique_batch_ids = pick_df['batch_id'].unique()
         if len(unique_batch_ids) == 1:
-            logger.info(f"  ✅ DataFrame already filtered to single batch_id: {unique_batch_ids[0]}")
-            batch_pick = pick_df  # Use directly, no need to filter
+            batch_pick = pick_df
         else:
-            # Need to filter - use normalized matching
             def normalize_batch_id(bid):
                 if pd.isna(bid):
                     return None
                 bid_str = str(bid)
                 normalized = bid_str.replace('B10-', '').replace('B', '').strip()
                 try:
-                    normalized = str(int(normalized))  # Strip leading zeros
+                    normalized = str(int(normalized))
                 except (ValueError, TypeError):
                     pass
                 return normalized
-            
+
             batch_id_normalized = normalize_batch_id(batch_id)
-            logger.info(f"  Normalized batch_id '{batch_id}' to '{batch_id_normalized}'")
-            
-            # Filter by batch_id (try exact match first, then normalized)
             batch_pick = pick_df[pick_df['batch_id'] == batch_id] if not pick_df.empty else pd.DataFrame()
             if batch_pick.empty:
-                # Try normalized matching
                 pick_df_normalized = pick_df['batch_id'].apply(normalize_batch_id)
                 batch_pick = pick_df[pick_df_normalized == batch_id_normalized]
-                logger.info(f"  Exact match: 0 jobs, Normalized match: {len(batch_pick)} jobs")
-            else:
-                logger.info(f"  Exact match: {len(batch_pick)} jobs")
-            
+
             if batch_pick.empty:
-                logger.warning(f"  ❌ No Pick jobs found for batch {batch_id} (normalized: {batch_id_normalized})")
-                logger.info(f"  Available batch_ids in pick_df: {pick_df['batch_id'].unique().tolist()}")
-                if 'batch_id' in pick_df.columns:
-                    normalized_available = pick_df['batch_id'].apply(normalize_batch_id).unique().tolist()
-                    logger.info(f"  Normalized batch_ids in pick_df: {normalized_available}")
+                logger.warning(f"No Pick jobs found for batch {batch_id}")
                 return None, None
     else:
         if 'batch_id' not in pick_df.columns:
-            logger.warning(f"  ❌ 'batch_id' column not found in pick_df. Available columns: {pick_df.columns.tolist()}")
             return None, None
         batch_pick = pick_df
     
     # Check for sheet timing columns
-    logger.info(f"  Checking for sheet timing columns...")
-    logger.info(f"  Available columns: {batch_pick.columns.tolist()}")
-    
     if 'sheet_start_ts' not in batch_pick.columns:
-        logger.error(f"  ❌ 'sheet_start_ts' column not found! Available: {batch_pick.columns.tolist()}")
+        logger.error(f"'sheet_start_ts' column not found")
         return None, None
-    
+
     if 'sheet_end_ts' not in batch_pick.columns:
-        logger.error(f"  ❌ 'sheet_end_ts' column not found! Available: {batch_pick.columns.tolist()}")
+        logger.error(f"'sheet_end_ts' column not found")
         return None, None
-    
-    logger.info(f"  ✅ Found sheet_start_ts and sheet_end_ts columns")
-    
-    # Get MIN(sheetStart_ts) and MAX(sheetEnd_ts)
-    # Log raw values to debug
-    logger.info(f"  Checking sheet_start_ts and sheet_end_ts values...")
-    logger.info(f"  Total rows: {len(batch_pick)}")
-    if len(batch_pick) > 0:
-        sample_row = batch_pick.iloc[0]
-        logger.info(f"  Sample row sheet_start_ts: {sample_row.get('sheet_start_ts')} (type: {type(sample_row.get('sheet_start_ts'))})")
-        logger.info(f"  Sample row sheet_end_ts: {sample_row.get('sheet_end_ts')} (type: {type(sample_row.get('sheet_end_ts'))})")
-        # Check if they're empty strings vs NULL
-        if 'sheet_start_ts' in batch_pick.columns:
-            non_null_count = batch_pick['sheet_start_ts'].notna().sum()
-            empty_string_count = (batch_pick['sheet_start_ts'].astype(str).str.strip() == '').sum()
-            logger.info(f"  sheet_start_ts: {non_null_count} non-null, {empty_string_count} empty strings, {len(batch_pick) - non_null_count - empty_string_count} NULL")
-        if 'sheet_end_ts' in batch_pick.columns:
-            non_null_count = batch_pick['sheet_end_ts'].notna().sum()
-            empty_string_count = (batch_pick['sheet_end_ts'].astype(str).str.strip() == '').sum()
-            logger.info(f"  sheet_end_ts: {non_null_count} non-null, {empty_string_count} empty strings, {len(batch_pick) - non_null_count - empty_string_count} NULL")
-    
-    start_times = batch_pick['sheet_start_ts'].dropna()
-    end_times = batch_pick['sheet_end_ts'].dropna()
-    
-    # Also filter out empty strings
-    if 'sheet_start_ts' in batch_pick.columns:
-        start_times = batch_pick[batch_pick['sheet_start_ts'].notna() & (batch_pick['sheet_start_ts'].astype(str).str.strip() != '')]['sheet_start_ts']
-    if 'sheet_end_ts' in batch_pick.columns:
-        end_times = batch_pick[batch_pick['sheet_end_ts'].notna() & (batch_pick['sheet_end_ts'].astype(str).str.strip() != '')]['sheet_end_ts']
-    
-    logger.info(f"  Non-null start_times: {len(start_times)}/{len(batch_pick)}")
-    logger.info(f"  Non-null end_times: {len(end_times)}/{len(batch_pick)}")
-    
-    if not start_times.empty:
-        logger.info(f"  Sample start_times: {start_times.head(3).tolist()}")
-    if not end_times.empty:
-        logger.info(f"  Sample end_times: {end_times.head(3).tolist()}")
-    
+
+    # Filter out empty strings and NULL values
+    start_times = batch_pick[batch_pick['sheet_start_ts'].notna() & (batch_pick['sheet_start_ts'].astype(str).str.strip() != '')]['sheet_start_ts']
+    end_times = batch_pick[batch_pick['sheet_end_ts'].notna() & (batch_pick['sheet_end_ts'].astype(str).str.strip() != '')]['sheet_end_ts']
+
     if start_times.empty or end_times.empty:
-        logger.warning(f"  ❌ No valid sheet timestamps found for batch {batch_id}")
-        logger.warning(f"    start_times empty: {start_times.empty}, end_times empty: {end_times.empty}")
-        # Check if the JSON path in SQL query is correct
-        logger.warning(f"    This suggests sheetStart_ts/sheetEnd_ts are not being extracted from JSON correctly")
+        logger.warning(f"No valid sheet timestamps found for batch {batch_id}")
         return None, None
-    
+
     batch_start = start_times.min()
     batch_end = end_times.max()
-    
-    logger.info(f"  ✅ Batch {batch_id} time window: {batch_start} to {batch_end}")
+
     return batch_start, batch_end
 
 
@@ -1370,11 +1189,8 @@ def fetch_robot_equipment_states(
     Returns:
         Dictionary with 'running_time_sec' and 'downtime_sec'
     """
-    logger.info(f"🔍 Fetching robot equipment states for {cell}")
-    logger.info(f"  Time window: {start_ts} to {end_ts}")
-    
     if not start_ts or not end_ts:
-        logger.warning(f"  ❌ Missing start or end timestamp: start_ts={start_ts}, end_ts={end_ts}")
+        logger.warning(f"Missing start or end timestamp for {cell}")
         return {'running_time_sec': 0.0, 'downtime_sec': 0.0}
     
     try:
@@ -1406,33 +1222,19 @@ def fetch_robot_equipment_states(
                 GROUP BY state;
             """
             
-            logger.info(f"  Executing query with parameters: cell={cell}, start={start_ts}, end={end_ts}")
             cursor.execute(query, [cell, start_ts, end_ts, end_ts, end_ts, start_ts, end_ts, start_ts])
             results = cursor.fetchall()
             cursor.close()
-            
-            logger.info(f"  Query returned {len(results)} state groups")
-            
+
             running_time_sec = 0.0
             downtime_sec = 0.0
-            
+
             for state, duration in results:
                 duration_float = float(duration) if duration else 0.0
-                logger.info(f"  State '{state}': {duration_float:.1f}s")
                 if state == 'running':
                     running_time_sec += duration_float
                 elif state == 'down':
                     downtime_sec += duration_float
-                # Other states (idle, maintenance, etc.) can be added if needed
-            
-            total_time = running_time_sec + downtime_sec
-            logger.info(f"  ✅ Robot {cell} states summary:")
-            logger.info(f"    Running: {running_time_sec:.1f}s")
-            logger.info(f"    Down: {downtime_sec:.1f}s")
-            logger.info(f"    Total: {total_time:.1f}s")
-            if total_time > 0:
-                availability = (running_time_sec / total_time) * 100
-                logger.info(f"    Availability: {availability:.2f}%")
             
             return {
                 'running_time_sec': running_time_sec,
@@ -1440,9 +1242,7 @@ def fetch_robot_equipment_states(
             }
             
     except Exception as e:
-        logger.error(f"  ❌ Error querying equipment states for {cell}: {e}", exc_info=True)
-        import traceback
-        logger.error(f"  Traceback: {traceback.format_exc()}")
+        logger.error(f"Error querying equipment states for {cell}: {e}", exc_info=True)
         return {'running_time_sec': 0.0, 'downtime_sec': 0.0}
 
 
@@ -2902,30 +2702,27 @@ def get_distinct_equipment_states(start_date: str = '2025-12-01') -> List[str]:
     Returns:
         List of distinct state names found in the equipment table
     """
-    logger.info(f"🔍 Querying distinct equipment states since {start_date}")
-    
     try:
         with get_historian_connection() as conn:
             cursor = conn.cursor()
-            
+
             query = """
-                SELECT DISTINCT state 
-                FROM public.equipment 
+                SELECT DISTINCT state
+                FROM public.equipment
                 WHERE ts >= %s::timestamp
                 ORDER BY state;
             """
-            
+
             cursor.execute(query, [start_date])
             results = cursor.fetchall()
             cursor.close()
-            
+
             states = [row[0] for row in results if row[0] is not None]
-            logger.info(f"  Found {len(states)} distinct states: {', '.join(states)}")
-            
+
             return states
-            
+
     except Exception as e:
-        logger.error(f"  ❌ Error querying distinct states: {e}", exc_info=True)
+        logger.error(f"Error querying distinct states: {e}", exc_info=True)
         return []
 
 
@@ -2953,11 +2750,8 @@ def fetch_equipment_states_with_durations(
         - duration_seconds: How long this state lasted
         - next_ts: Timestamp when state ended (next state change)
     """
-    logger.info(f"🔍 Fetching equipment states with durations for {cell}")
-    logger.info(f"  Time window: {start_ts} to {end_ts}")
-    
     if not start_ts or not end_ts:
-        logger.warning("  Missing start or end timestamp")
+        logger.warning("Missing start or end timestamp")
         return pd.DataFrame(columns=['ts', 'state', 'description', 'duration_seconds', 'next_ts'])
     
     try:
@@ -3054,7 +2848,6 @@ def fetch_equipment_states_with_durations(
                 ORDER BY ts ASC;
             """
             
-            logger.info(f"  Executing query with parameters: cell={cell}, start={start_ts}, end={end_ts}")
             cursor.execute(query, [
                 cell,           # 1: cell = %s (state_before_window)
                 start_ts,       # 2: ts <= %s::timestamp (state_before_window)
@@ -3079,11 +2872,8 @@ def fetch_equipment_states_with_durations(
             ])
             results = cursor.fetchall()
             cursor.close()
-            
-            logger.info(f"  Query returned {len(results)} state records")
-            
+
             if not results:
-                logger.warning(f"  No equipment state data found for {cell}")
                 return pd.DataFrame(columns=['ts', 'state', 'description', 'duration_seconds', 'next_ts'])
             
             # Convert to DataFrame
@@ -3111,42 +2901,12 @@ def fetch_equipment_states_with_durations(
             # Ensure duration_seconds is numeric
             df['duration_seconds'] = pd.to_numeric(df['duration_seconds'], errors='coerce').fillna(0.0)
 
-            # Filter out records with zero or negative duration (these represent instantaneous state changes)
+            # Filter out records with zero or negative duration
             df = df[df['duration_seconds'] > 0].copy()
-
-            # DEBUG: Log each individual state record
-            logger.info(f"  🔍 DEBUG: Individual state records returned by query:")
-            for idx, row in df.iterrows():
-                logger.info(f"    [{idx}] {row['ts']} -> {row['next_ts']} | state={row['state']} | duration={row['duration_seconds']:.2f}s ({row['duration_seconds']/60:.2f}min)")
-
-            # Log raw state summary (before categorization) - this should match user's direct SQL query
-            raw_state_summary = df.groupby('state')['duration_seconds'].sum().to_dict()
-            total_raw_seconds = sum(raw_state_summary.values())
-            window_duration = (pd.to_datetime(end_ts) - pd.to_datetime(start_ts)).total_seconds()
-            logger.info(f"  📊 Raw equipment states summary for {cell} (before categorization):")
-            logger.info(f"  ⏱️  Time window duration: {window_duration:.1f}s ({window_duration/60:.1f} min)")
-            logger.info(f"  📈 Total recorded state time: {total_raw_seconds:.1f}s ({total_raw_seconds/60:.1f} min)")
-            logger.info(f"  📉 Gap (unrecorded time): {max(0, window_duration - total_raw_seconds):.1f}s ({max(0, window_duration - total_raw_seconds)/60:.1f} min)")
-            for state, total_duration in sorted(raw_state_summary.items(), key=lambda x: x[1], reverse=True):
-                pct = (total_duration / total_raw_seconds * 100) if total_raw_seconds > 0 else 0
-                pct_of_window = (total_duration / window_duration * 100) if window_duration > 0 else 0
-                logger.info(f"    {state}: {total_duration:.1f}s ({total_duration/60:.1f} min, {pct:.1f}% of recorded, {pct_of_window:.1f}% of window)")
-            
-            # Also log first few rows for debugging
-            if len(df) > 0:
-                logger.info(f"  🔍 First 5 state records:")
-                for idx, row in df.head(5).iterrows():
-                    logger.info(f"    Row {idx}: ts={row['ts']}, state={row['state']}, duration={row['duration_seconds']:.1f}s, next_ts={row['next_ts']}")
-            
-            # Log summary
-            state_summary = df.groupby('state')['duration_seconds'].sum().to_dict()
-            logger.info(f"  ✅ Equipment states summary for {cell}:")
-            for state, total_duration in state_summary.items():
-                logger.info(f"    {state}: {total_duration:.1f}s ({total_duration/60:.1f} min)")
             
             return df
             
     except Exception as e:
-        logger.error(f"  ❌ Error fetching equipment states for {cell}: {e}", exc_info=True)
+        logger.error(f"Error fetching equipment states for {cell}: {e}", exc_info=True)
         return pd.DataFrame(columns=['ts', 'state', 'description', 'duration_seconds', 'next_ts'])
 

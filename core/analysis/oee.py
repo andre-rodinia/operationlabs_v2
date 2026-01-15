@@ -50,7 +50,6 @@ def calculate_print_performance(df: pd.DataFrame) -> pd.Series:
     # Cap at reasonable limits (equipment can exceed nominal)
     performance = np.clip(performance, 0, 150)
     
-    logger.info(f"Print performance calculated: Avg {performance.mean():.1f}%")
     
     return pd.Series(performance, index=df.index)
 
@@ -80,7 +79,6 @@ def calculate_print_performance_capped(df: pd.DataFrame) -> pd.Series:
     # Cap at 100% for batch-level calculations
     performance_capped = np.clip(performance, 0, 100)
     
-    logger.info(f"Print performance (capped) calculated: Avg {performance_capped.mean():.1f}%")
     
     return pd.Series(performance_capped, index=df.index)
 
@@ -99,7 +97,6 @@ def calculate_cut_performance(df: pd.DataFrame) -> pd.Series:
     Returns:
         Series with performance percentages (always 100%)
     """
-    logger.info("Cut performance set to 100% (no speed variance data)")
     return pd.Series([100.0] * len(df), index=df.index)
 
 
@@ -119,7 +116,6 @@ def calculate_pick_performance(df: pd.DataFrame) -> pd.Series:
     Returns:
         Series with performance percentages (always 100%)
     """
-    logger.info("Pick performance set to 100% (robot operates at nominal speed)")
     return pd.Series([100.0] * len(df), index=df.index)
 
 
@@ -158,9 +154,6 @@ def calculate_pick_quality_from_jobreport(df: pd.DataFrame) -> pd.Series:
         100.0  # If no attempts recorded, assume 100%
     )
     
-    logger.info(f"Pick quality calculated from JobReport: Avg {quality.mean():.1f}%")
-    logger.info(f"  Total completed: {df['components_completed'].sum()}")
-    logger.info(f"  Total failed: {df['components_failed'].sum()}")
     
     return pd.Series(quality, index=df.index)
 
@@ -291,10 +284,6 @@ def apply_qc_quality_to_cells(
             
             qc_applied_count = df['quality_qc_percent'].notna().sum()
             logger.info(f"{cell_name}: Applied QC to {qc_applied_count}/{len(df)} jobs")
-            logger.info(f"  Avg quality before QC: {df['quality_before_qc'].mean():.1f}%")
-            logger.info(f"  Avg quality after QC: {df['quality'].mean():.1f}%")
-            logger.info(f"  Avg OEE before QC: {df['oee_before_qc'].mean():.1f}%")
-            logger.info(f"  Avg OEE after QC: {df['oee'].mean():.1f}%")
             
             # Clean up temporary columns
             df.drop(['batch_id_numeric', 'quality_qc_percent'], axis=1, inplace=True, errors='ignore')
@@ -364,10 +353,7 @@ def calculate_cell_oee(df: pd.DataFrame, cell_type: str) -> pd.DataFrame:
     )
     
     logger.info(f"Calculated OEE for {len(result_df)} {cell_type} jobs")
-    logger.info(f"  Avg Availability: {result_df['availability'].mean():.1f}%")
-    logger.info(f"  Avg Performance: {result_df['performance'].mean():.1f}%")
     logger.info(f"  Avg Quality: {result_df['quality'].mean():.1f}%")
-    logger.info(f"  Avg OEE: {result_df['oee'].mean():.1f}%")
     
     return result_df
 
@@ -518,14 +504,6 @@ def calculate_daily_utilization(
         }
         
         if debug_mode:
-            logger.info(f"\n{cell_name.upper()} Daily Metrics:")
-            logger.info(f"  Production Time: {production_time:.1f} min ({production_time/60:.1f} hrs)")
-            logger.info(f"  Uptime: {total_uptime:.1f} min")
-            logger.info(f"  Downtime: {total_downtime:.1f} min")
-            logger.info(f"  Idle: {idle_time:.1f} min ({idle_time/60:.1f} hrs)")
-            logger.info(f"  Utilization: {utilization:.1f}%")
-            logger.info(f"  Batch OEE: {batch_oee:.1f}%")
-            logger.info(f"  Daily OEE: {daily_oee:.1f}%")
     
     # Calculate summary
     cells_with_data = [c for c in ['print', 'cut', 'pick'] if results[c]['production_time_min'] > 0]
