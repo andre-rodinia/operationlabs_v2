@@ -3114,6 +3114,11 @@ def fetch_equipment_states_with_durations(
             # Filter out records with zero or negative duration (these represent instantaneous state changes)
             df = df[df['duration_seconds'] > 0].copy()
 
+            # DEBUG: Log each individual state record
+            logger.info(f"  🔍 DEBUG: Individual state records returned by query:")
+            for idx, row in df.iterrows():
+                logger.info(f"    [{idx}] {row['ts']} -> {row['next_ts']} | state={row['state']} | duration={row['duration_seconds']:.2f}s ({row['duration_seconds']/60:.2f}min)")
+
             # Log raw state summary (before categorization) - this should match user's direct SQL query
             raw_state_summary = df.groupby('state')['duration_seconds'].sum().to_dict()
             total_raw_seconds = sum(raw_state_summary.values())
