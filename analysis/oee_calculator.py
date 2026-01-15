@@ -248,13 +248,14 @@ def calculate_batch_metrics(
             if isinstance(pick_end_ts, str):
                 pick_end_ts = pd.to_datetime(pick_end_ts)
 
-            # Calculate total time from time window for daily metrics (like Print/Cut use job runtime)
-            pick_total_time = (pick_end_ts - pick_start_ts).total_seconds()
-
             # Query equipment states for the batch time window
             equipment_states = fetch_robot_equipment_states('Pick1', pick_start_ts, pick_end_ts)
             running_time_sec = equipment_states['running_time_sec']
             downtime_sec = equipment_states['downtime_sec']
+
+            # Calculate total time from equipment states (like Print/Cut use actual job runtime)
+            # This ensures Pick's production time only includes running + down, not idle gaps
+            pick_total_time = running_time_sec + downtime_sec
 
             # Calculate availability using equipment states only (for batch OEE)
             # This keeps batch OEE calculation consistent with the original method
