@@ -112,16 +112,24 @@ def display_cell_timeline(
             overlap_end = min(end_ts, break_end)
 
             if overlap_end > overlap_start:
-                # Add gray shaded region for break period
+                # Add gray shaded region for break period (without annotation to avoid datetime issues)
                 fig.add_vrect(
                     x0=overlap_start,
                     x1=overlap_end,
                     fillcolor="gray",
                     opacity=0.3,
                     layer="below",
-                    line_width=0,
-                    annotation_text="Break",
-                    annotation_position="top"
+                    line_width=0
+                )
+
+                # Add text annotation separately
+                fig.add_annotation(
+                    x=overlap_start + (overlap_end - overlap_start) / 2,
+                    y=1.05,
+                    yref="paper",
+                    text="Break",
+                    showarrow=False,
+                    font=dict(size=10, color="gray")
                 )
 
         fig.update_layout(
