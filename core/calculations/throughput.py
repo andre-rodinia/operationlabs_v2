@@ -186,7 +186,21 @@ def calculate_hourly_state_breakdown(
             gap_sec = max(0.0, total_sec - recorded_sec)
             if gap_sec > 0:
                 other_sec += gap_sec
-        
+
+        # Subtract break time from the state durations to avoid double-counting
+        # Break time overlaps with equipment states, so we need to remove it proportionally
+        if break_sec > 0 and (running_sec + idle_sec + fault_sec + blocked_sec + other_sec) > 0:
+            # Calculate the proportion of break to subtract from each state
+            # Subtract proportionally based on each state's share of total time
+            total_state_sec = running_sec + idle_sec + fault_sec + blocked_sec + other_sec
+            ratio = (total_state_sec - break_sec) / total_state_sec if total_state_sec > 0 else 0
+
+            running_sec = running_sec * ratio
+            idle_sec = idle_sec * ratio
+            fault_sec = fault_sec * ratio
+            blocked_sec = blocked_sec * ratio
+            other_sec = other_sec * ratio
+
         # Calculate percentages - all based on total time for stacked bar visualization
         if total_sec > 0:
             running_pct = (running_sec / total_sec) * 100
