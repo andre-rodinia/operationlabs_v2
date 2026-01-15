@@ -2970,26 +2970,26 @@ def fetch_equipment_states_with_durations(
             query = """
                 WITH state_before_window AS (
                     -- Get the state that was active BEFORE the window started
-                    SELECT 
+                    SELECT
                         ts,
                         state,
                         COALESCE(description, '') AS description
                     FROM public.equipment
                     WHERE cell = %s
-                      AND ts <= %s::timestamp  -- States up to window start
+                      AND ts <= %s::timestamptz  -- States up to window start (preserve timezone)
                     ORDER BY ts DESC
                     LIMIT 1
                 ),
                 states_in_window AS (
                     -- States that start within the window (matches user's query: ts > start AND ts < end)
-                    SELECT 
+                    SELECT
                         ts,
                         state,
                         COALESCE(description, '') AS description
                     FROM public.equipment
                     WHERE cell = %s
-                      AND ts > %s::timestamp   -- Exclusive start (matches user's query)
-                      AND ts < %s::timestamp   -- Exclusive end (matches user's query)
+                      AND ts > %s::timestamptz   -- Exclusive start (preserve timezone)
+                      AND ts < %s::timestamptz   -- Exclusive end (preserve timezone)
                     ORDER BY ts ASC
                 ),
                 all_relevant_states AS (
@@ -3009,47 +3009,47 @@ def fetch_equipment_states_with_durations(
                         EXTRACT(EPOCH FROM (LEAD(ts) OVER (ORDER BY ts ASC) - ts)) AS duration_seconds
                     FROM all_relevant_states
                 )
-                SELECT 
+                SELECT
                     -- Adjust ts to window start if state started before window
-                    CASE 
-                        WHEN ts <= %s::timestamp THEN %s::timestamp
+                    CASE
+                        WHEN ts <= %s::timestamptz THEN %s::timestamptz
                         ELSE ts
                     END AS ts,
                     state,
                     description,
                     -- Calculate duration within window only
-                    CASE 
-                        WHEN ts <= %s::timestamp THEN
+                    CASE
+                        WHEN ts <= %s::timestamptz THEN
                             -- State started before/at window start: duration from window start to next_ts or window end
-                            CASE 
-                                WHEN next_ts IS NOT NULL AND next_ts < %s::timestamp THEN
-                                    EXTRACT(EPOCH FROM (next_ts - %s::timestamp))
-                                WHEN next_ts IS NULL OR next_ts >= %s::timestamp THEN
-                                    EXTRACT(EPOCH FROM (%s::timestamp - %s::timestamp))
+                            CASE
+                                WHEN next_ts IS NOT NULL AND next_ts < %s::timestamptz THEN
+                                    EXTRACT(EPOCH FROM (next_ts - %s::timestamptz))
+                                WHEN next_ts IS NULL OR next_ts >= %s::timestamptz THEN
+                                    EXTRACT(EPOCH FROM (%s::timestamptz - %s::timestamptz))
                                 ELSE 0
                             END
                         ELSE
                             -- State started in window: use calculated duration, but cap at window end
-                            CASE 
-                                WHEN next_ts IS NOT NULL AND next_ts < %s::timestamp THEN
+                            CASE
+                                WHEN next_ts IS NOT NULL AND next_ts < %s::timestamptz THEN
                                     duration_seconds
-                                WHEN next_ts IS NULL OR next_ts >= %s::timestamp THEN
-                                    EXTRACT(EPOCH FROM (%s::timestamp - ts))
+                                WHEN next_ts IS NULL OR next_ts >= %s::timestamptz THEN
+                                    EXTRACT(EPOCH FROM (%s::timestamptz - ts))
                                 ELSE 0
                             END
                     END AS duration_seconds,
                     CASE
-                        WHEN next_ts IS NOT NULL AND next_ts < %s::timestamp THEN
+                        WHEN next_ts IS NOT NULL AND next_ts < %s::timestamptz THEN
                             next_ts
                         ELSE
-                            %s::timestamp
+                            %s::timestamptz
                     END AS next_ts
                 FROM state_durations
                 WHERE (
                     -- Include states that overlap with the window:
                     -- State starts before window end AND (state ends after window start OR is still active)
-                    ts < %s::timestamp  -- State started before window end
-                    AND (next_ts IS NULL OR next_ts > %s::timestamp)  -- State ended after window start (or still active)
+                    ts < %s::timestamptz  -- State started before window end
+                    AND (next_ts IS NULL OR next_ts > %s::timestamptz)  -- State ended after window start (or still active)
                 )
                 ORDER BY ts ASC;
             """
