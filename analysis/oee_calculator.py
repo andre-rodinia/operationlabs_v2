@@ -280,24 +280,29 @@ def calculate_batch_metrics(
         
         if pick_start_ts and pick_end_ts:
             logger.info(f"  ✅ Got time window: {pick_start_ts} to {pick_end_ts}")
+
+            # Calculate total time from time window (like Print/Cut use job runtime)
+            pick_total_time = (pick_end_ts - pick_start_ts).total_seconds()
+            logger.info(f"  Batch time window duration: {pick_total_time:.1f}s ({pick_total_time/3600:.2f}h)")
+
             # Query equipment states for the batch time window
             equipment_states = fetch_robot_equipment_states('Pick1', pick_start_ts, pick_end_ts)
             running_time_sec = equipment_states['running_time_sec']
             downtime_sec = equipment_states['downtime_sec']
-            total_time_sec = running_time_sec + downtime_sec
-            
+
             logger.info(f"  Equipment states returned: {equipment_states}")
-            
-            # Calculate availability from equipment states
-            if total_time_sec > 0:
-                pick_availability = (running_time_sec / total_time_sec) * 100
-                logger.info(f"  ✅ Calculated availability: {pick_availability:.2f}% = ({running_time_sec:.1f}s / {total_time_sec:.1f}s) × 100")
+            logger.info(f"  Running time: {running_time_sec:.1f}s, Downtime from states: {downtime_sec:.1f}s")
+
+            # Calculate availability: running time / total batch window
+            # (Downtime is everything else: idle, faults, waiting, gaps in telemetry)
+            if pick_total_time > 0:
+                pick_availability = (running_time_sec / pick_total_time) * 100
+                logger.info(f"  ✅ Calculated availability: {pick_availability:.2f}% = ({running_time_sec:.1f}s / {pick_total_time:.1f}s) × 100")
             else:
                 pick_availability = 0
                 logger.warning(f"  ⚠️ Total time is 0, setting availability to 0%")
-            
-            pick_total_time = total_time_sec
-            logger.info(f"  Final: availability={pick_availability:.2f}%, total_time={pick_total_time:.1f}s")
+
+            logger.info(f"  Final: availability={pick_availability:.2f}%, total_time={pick_total_time:.1f}s ({pick_total_time/3600:.2f}h)")
         else:
             # Fallback to job-level data if time window not available
             logger.warning(f"  ❌ Could not get time window (start={pick_start_ts}, end={pick_end_ts}), using job-level data fallback")
