@@ -216,12 +216,12 @@ def display_throughput_metrics(throughput_results: Dict):
             quality_rate = (system_metrics['sellable_components'] / system_metrics['total_components']) * 100
             st.metric("Quality Rate", f"{quality_rate:.1f}%")
 
-        # Show productive time (excluding breaks)
+        # Show productive time (excluding break overlaps)
         if system_metrics.get('system_productive_hours'):
             productive_h = system_metrics['system_productive_hours']
-            break_h = system_metrics.get('system_break_hours', 0.0)
-            if break_h > 0:
-                st.metric("System Time", f"{productive_h:.1f}h", delta=f"-{break_h:.1f}h breaks", delta_color="off")
+            break_overlap_h = system_metrics.get('system_break_overlap_hours', 0.0)
+            if break_overlap_h > 0:
+                st.metric("System Time", f"{productive_h:.1f}h", delta=f"-{break_overlap_h:.1f}h breaks", delta_color="off")
             else:
                 st.metric("System Time", f"{productive_h:.1f}h")
     

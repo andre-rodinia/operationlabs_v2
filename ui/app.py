@@ -236,21 +236,50 @@ if st.session_state.batches_df is not None and not st.session_state.batches_df.e
 
         # Lunch break input
         st.subheader("⏰ Break Time Configuration")
-        col1, col2 = st.columns([2, 1])
+        st.caption("Specify when planned breaks (e.g., lunch) occurred to exclude from productive time")
+
+        col1, col2, col3 = st.columns(3)
         with col1:
-            lunch_break_minutes = st.number_input(
-                "Lunch/Break Duration (minutes)",
-                min_value=0.0,
-                max_value=480.0,  # Max 8 hours
-                value=0.0,
-                step=15.0,
-                help="Enter the duration of planned breaks (e.g., lunch) to exclude from productive time calculations"
-            )
-        with col2:
-            st.metric("Break Time", f"{lunch_break_minutes:.0f} min")
+            include_break = st.checkbox("Include Break Period", value=False, help="Check if this batch included a scheduled break")
+
+        break_start = None
+        break_end = None
+        break_duration_minutes = 0.0
+
+        if include_break:
+            with col2:
+                break_start = st.time_input(
+                    "Break Start Time",
+                    value=None,
+                    help="Time when the break started (e.g., 12:12)"
+                )
+            with col3:
+                break_end = st.time_input(
+                    "Break End Time",
+                    value=None,
+                    help="Time when the break ended (e.g., 12:55)"
+                )
+
+            # Calculate duration if both times provided
+            if break_start and break_end:
+                # Convert to datetime for calculation
+                from datetime import datetime, timedelta
+                start_dt = datetime.combine(datetime.today(), break_start)
+                end_dt = datetime.combine(datetime.today(), break_end)
+
+                # Handle case where break crosses midnight
+                if end_dt < start_dt:
+                    end_dt += timedelta(days=1)
+
+                break_duration = end_dt - start_dt
+                break_duration_minutes = break_duration.total_seconds() / 60.0
+
+                st.info(f"⏱️ Break Duration: {break_duration_minutes:.0f} minutes ({break_duration_minutes/60:.1f} hours)")
 
         # Store in session state
-        st.session_state.lunch_break_minutes = lunch_break_minutes
+        st.session_state.break_start = break_start
+        st.session_state.break_end = break_end
+        st.session_state.break_duration_minutes = break_duration_minutes
 
         st.markdown("---")
 
@@ -915,9 +944,35 @@ if st.session_state.print_df is not None:
                                 states_df, start_ts, end_ts
                             )
                             
-                            # Calculate summary (pass start_ts, end_ts, and break_minutes)
-                            break_minutes = st.session_state.get('lunch_break_minutes', 0.0)
-                            summary = calculate_state_summary(states_df, start_ts, end_ts, break_minutes=break_minutes)
+                            # Calculate summary (pass start_ts, end_ts, and break window)
+                            break_start_time = st.session_state.get('break_start')
+                            break_end_time = st.session_state.get('break_end')
+
+                            # Convert break times to full datetime objects if provided
+                            break_start_dt = None
+                            break_end_dt = None
+                            if break_start_time and break_end_time:
+                                from datetime import datetime, timedelta
+                                # Use the date from start_ts to create break datetime
+                                break_date = start_ts.date()
+                                break_start_dt = datetime.combine(break_date, break_start_time)
+                                break_end_dt = datetime.combine(break_date, break_end_time)
+
+                                # Ensure timezone-aware (match the cell timestamps)
+                                from dateutil.tz import gettz
+                                copenhagen_tz = gettz('Europe/Copenhagen')
+                                if break_start_dt.tzinfo is None:
+                                    break_start_dt = break_start_dt.replace(tzinfo=copenhagen_tz)
+                                if break_end_dt.tzinfo is None:
+                                    break_end_dt = break_end_dt.replace(tzinfo=copenhagen_tz)
+
+                            summary = calculate_state_summary(
+                                states_df,
+                                start_ts,
+                                end_ts,
+                                break_start=break_start_dt,
+                                break_end=break_end_dt
+                            )
                             
                             cell_data[cell_name] = {
                                 'hourly_df': hourly_df,

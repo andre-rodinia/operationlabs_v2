@@ -204,20 +204,23 @@ def calculate_state_summary(
     states_df: pd.DataFrame,
     start_ts: datetime,
     end_ts: datetime,
-    break_minutes: float = 0.0
+    break_start: Optional[datetime] = None,
+    break_end: Optional[datetime] = None
 ) -> Dict[str, float]:
     """
     Sum up total time in each state category and calculate utilization.
 
     Uses the full time window (start_ts to end_ts) as the total time, not just
-    the sum of recorded state durations. This ensures consistency with hourly breakdown.
+    the sum of recorded state durations. Only subtracts break time if the break
+    period overlaps with this cell's time window.
 
     Args:
         states_df: DataFrame from fetch_equipment_states_with_durations with columns:
                    ts, state, description, duration_seconds, next_ts
         start_ts: Start timestamp for the analysis window
         end_ts: End timestamp for the analysis window
-        break_minutes: Planned break time in minutes (e.g., lunch break) to exclude from productive time
+        break_start: Break start timestamp (optional, only if break occurred)
+        break_end: Break end timestamp (optional, only if break occurred)
 
     Returns:
         Dictionary with:
@@ -227,21 +230,34 @@ def calculate_state_summary(
         - blocked_seconds: Total seconds in blocked/waiting state (tandem interference)
         - other_seconds: Total seconds in other state
         - total_seconds: Total time analyzed (end_ts - start_ts)
-        - productive_seconds: Total time minus breaks (total_seconds - break_seconds)
-        - break_seconds: Planned break time in seconds
+        - productive_seconds: Total time minus break overlap (total_seconds - break_overlap_seconds)
+        - break_overlap_seconds: Break time that overlaps with this cell's window
         - running_percent: Percentage running (of total time)
         - idle_percent: Percentage idle (of total time)
         - fault_percent: Percentage fault (of total time)
         - blocked_percent: Percentage blocked (of total time)
         - other_percent: Percentage other (of total time)
         - utilization: Running time / Total time (0-1)
-        - productive_utilization: Running time / Productive time (0-1, excluding breaks)
+        - productive_utilization: Running time / Productive time (0-1, excluding break overlap)
     """
+    # Calculate break overlap with this cell's time window
+    break_overlap_sec = 0.0
+    if break_start and break_end and start_ts and end_ts:
+        # Only subtract break time if it overlaps with this cell's window
+        # Overlap calculation: max(0, min(end1, end2) - max(start1, start2))
+        overlap_start = max(start_ts, break_start)
+        overlap_end = min(end_ts, break_end)
+
+        if overlap_end > overlap_start:
+            break_overlap_sec = (overlap_end - overlap_start).total_seconds()
+            logger.info(f"Break overlap with cell window: {break_overlap_sec/60:.1f} minutes")
+        else:
+            logger.info("Break does not overlap with this cell's time window")
+
     if states_df.empty:
         logger.warning("Empty states DataFrame provided")
         total_sec = (end_ts - start_ts).total_seconds() if start_ts and end_ts else 0.0
-        break_sec = break_minutes * 60.0
-        productive_sec = max(0.0, total_sec - break_sec)
+        productive_sec = max(0.0, total_sec - break_overlap_sec)
         return {
             'running_seconds': 0.0,
             'idle_seconds': 0.0,
@@ -250,7 +266,7 @@ def calculate_state_summary(
             'other_seconds': 0.0,
             'total_seconds': total_sec,
             'productive_seconds': productive_sec,
-            'break_seconds': break_sec,
+            'break_overlap_seconds': break_overlap_sec,
             'running_percent': 0.0,
             'idle_percent': 0.0,
             'fault_percent': 0.0,
@@ -313,8 +329,7 @@ def calculate_state_summary(
 
     # Use the full time window as total time (not just sum of recorded states)
     total_sec = (end_ts - start_ts).total_seconds()
-    break_sec = break_minutes * 60.0
-    productive_sec = max(0.0, total_sec - break_sec)
+    productive_sec = max(0.0, total_sec - break_overlap_sec)
 
     # If there are gaps (unrecorded time), assign them to "other" or "idle"
     recorded_sec = running_sec + idle_sec + fault_sec + blocked_sec + other_sec
@@ -344,9 +359,9 @@ def calculate_state_summary(
         productive_utilization = 0.0
 
     logger.info(f"State summary: Running={running_pct:.1f}%, Idle={idle_pct:.1f}%, Fault={fault_pct:.1f}%, Blocked={blocked_pct:.1f}%, Utilization={utilization:.2%}, Productive Utilization={productive_utilization:.2%}")
-    if break_sec > 0:
-        logger.info(f"Break time: {break_sec/60:.1f} min, Productive time: {productive_sec/60:.1f} min")
-    
+    if break_overlap_sec > 0:
+        logger.info(f"Break overlap: {break_overlap_sec/60:.1f} min, Productive time: {productive_sec/60:.1f} min")
+
     return {
         'running_seconds': running_sec,
         'idle_seconds': idle_sec,
@@ -355,7 +370,7 @@ def calculate_state_summary(
         'other_seconds': other_sec,
         'total_seconds': total_sec,
         'productive_seconds': productive_sec,
-        'break_seconds': break_sec,
+        'break_overlap_seconds': break_overlap_sec,
         'running_percent': running_pct,
         'idle_percent': idle_pct,
         'fault_percent': fault_pct,
@@ -393,7 +408,7 @@ def calculate_cell_throughput(
     running_hours = state_summary['running_seconds'] / 3600.0
     total_hours = state_summary['total_seconds'] / 3600.0
     productive_hours = state_summary['productive_seconds'] / 3600.0
-    break_hours = state_summary['break_seconds'] / 3600.0
+    break_overlap_hours = state_summary.get('break_overlap_seconds', 0.0) / 3600.0
     blocked_hours = state_summary.get('blocked_seconds', 0.0) / 3600.0
 
     # Active throughput: when machine is actually running
@@ -426,7 +441,7 @@ def calculate_cell_throughput(
         'running_hours': running_hours,
         'productive_hours': productive_hours,
         'total_hours': total_hours,
-        'break_hours': break_hours,
+        'break_overlap_hours': break_overlap_hours,
         'blocked_hours': blocked_hours
     }
 
@@ -516,15 +531,15 @@ def calculate_system_throughput(
         system_total_hours = 0.0
 
     # Calculate productive hours (sum of productive time across all cells, not wall-clock)
-    # This represents actual scheduled work time excluding breaks
+    # This represents actual scheduled work time excluding break overlaps
     system_productive_hours = 0.0
-    system_break_hours = 0.0
+    system_break_overlap_hours = 0.0
     for cell_name, throughput in cell_throughputs.items():
         if 'productive_hours' in throughput:
             # Use the longest cell productive time as system productive time
             # (since all cells must finish for batch to complete)
             system_productive_hours = max(system_productive_hours, throughput['productive_hours'])
-            system_break_hours = max(system_break_hours, throughput.get('break_hours', 0.0))
+            system_break_overlap_hours = max(system_break_overlap_hours, throughput.get('break_overlap_hours', 0.0))
 
     # System-level throughputs based on productive time (excluding breaks)
     # This is the primary metric for system performance
@@ -580,8 +595,8 @@ def calculate_system_throughput(
             'total_components': total_components,
             'total_garments': total_garments,
             'system_total_hours': system_total_hours,  # Wall-clock time from first start to last end
-            'system_productive_hours': system_productive_hours,  # Productive time (excluding breaks)
-            'system_break_hours': system_break_hours,  # Break time
+            'system_productive_hours': system_productive_hours,  # Productive time (excluding break overlaps)
+            'system_break_overlap_hours': system_break_overlap_hours,  # Break overlap time
             'system_components_per_hour': system_components_per_hour,  # Based on productive time
             'system_garments_per_hour': system_garments_per_hour,  # Based on productive time
             'bottleneck_active_throughput': lowest_throughput if bottleneck else None,  # Theoretical max
