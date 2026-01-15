@@ -234,6 +234,26 @@ if st.session_state.batches_df is not None and not st.session_state.batches_df.e
         st.markdown("---")
         st.header("3️⃣ Fetch & Analyze Data")
 
+        # Lunch break input
+        st.subheader("⏰ Break Time Configuration")
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            lunch_break_minutes = st.number_input(
+                "Lunch/Break Duration (minutes)",
+                min_value=0.0,
+                max_value=480.0,  # Max 8 hours
+                value=0.0,
+                step=15.0,
+                help="Enter the duration of planned breaks (e.g., lunch) to exclude from productive time calculations"
+            )
+        with col2:
+            st.metric("Break Time", f"{lunch_break_minutes:.0f} min")
+
+        # Store in session state
+        st.session_state.lunch_break_minutes = lunch_break_minutes
+
+        st.markdown("---")
+
         if st.button("📊 Calculate OEE", type="primary", use_container_width=True):
             with st.spinner("Fetching JobReports and calculating OEE..."):
 
@@ -895,8 +915,9 @@ if st.session_state.print_df is not None:
                                 states_df, start_ts, end_ts
                             )
                             
-                            # Calculate summary (pass start_ts and end_ts for consistent time window)
-                            summary = calculate_state_summary(states_df, start_ts, end_ts)
+                            # Calculate summary (pass start_ts, end_ts, and break_minutes)
+                            break_minutes = st.session_state.get('lunch_break_minutes', 0.0)
+                            summary = calculate_state_summary(states_df, start_ts, end_ts, break_minutes=break_minutes)
                             
                             cell_data[cell_name] = {
                                 'hourly_df': hourly_df,

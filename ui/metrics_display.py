@@ -186,25 +186,25 @@ def display_throughput_metrics(throughput_results: Dict):
     
     # System-level metrics in three columns
     col1, col2, col3 = st.columns(3)
-    
+
     with col1:
         st.markdown("**Raw Output**")
+        st.caption("Productive throughput (excl. breaks)")
         if system_metrics['system_components_per_hour']:
             st.metric("Components/Hour", f"{system_metrics['system_components_per_hour']:.1f}")
-        if system_metrics['total_garments']:
-            # Use actual production time for throughput calculation
-            garments_per_hour = system_metrics['total_garments'] / system_metrics['system_total_hours'] if system_metrics['system_total_hours'] > 0 else 0
-            st.metric("Garments/Hour", f"{garments_per_hour:.1f}")
-    
+        if system_metrics['system_garments_per_hour']:
+            st.metric("Garments/Hour", f"{system_metrics['system_garments_per_hour']:.1f}")
+
     with col2:
         st.markdown("**Sellable Output**")
+        st.caption("Quality-adjusted throughput")
         if system_metrics['sellable_components_per_hour']:
             st.metric("Components/Hour", f"{system_metrics['sellable_components_per_hour']:.1f}")
         if system_metrics['sellable_garments_per_hour']:
             st.metric("Garments/Hour", f"{system_metrics['sellable_garments_per_hour']:.1f}")
         if not system_metrics['sellable_components_per_hour']:
             st.info("QC data not available")
-    
+
     with col3:
         st.markdown("**Efficiency**")
         # Calculate quality rate from garments directly (not estimated components)
@@ -215,8 +215,15 @@ def display_throughput_metrics(throughput_results: Dict):
             # Fallback to components if garments not available
             quality_rate = (system_metrics['sellable_components'] / system_metrics['total_components']) * 100
             st.metric("Quality Rate", f"{quality_rate:.1f}%")
-        if system_metrics['system_total_hours']:
-            st.metric("System Time", f"{system_metrics['system_total_hours']:.1f}h")
+
+        # Show productive time (excluding breaks)
+        if system_metrics.get('system_productive_hours'):
+            productive_h = system_metrics['system_productive_hours']
+            break_h = system_metrics.get('system_break_hours', 0.0)
+            if break_h > 0:
+                st.metric("System Time", f"{productive_h:.1f}h", delta=f"-{break_h:.1f}h breaks", delta_color="off")
+            else:
+                st.metric("System Time", f"{productive_h:.1f}h")
     
     st.divider()
     
@@ -224,15 +231,25 @@ def display_throughput_metrics(throughput_results: Dict):
     if cell_throughputs:
         throughput_data = []
         for cell_name, throughput in cell_throughputs.items():
-            throughput_data.append({
+            row = {
                 'Cell': cell_name,
                 'Active Throughput (comp/hr)': f"{throughput['active_throughput_components_per_hour']:.1f}",
-                'Calendar Throughput (comp/hr)': f"{throughput['calendar_throughput_components_per_hour']:.1f}",
-                'Utilization': f"{throughput['utilization']:.1%}"
-            })
-        
+                'Productive Throughput (comp/hr)': f"{throughput.get('productive_throughput_components_per_hour', 0):.1f}",
+                'Utilization': f"{throughput.get('productive_utilization', throughput['utilization']):.1%}"
+            }
+
+            # Add blocked hours if available (for future tandem tracking)
+            if throughput.get('blocked_hours', 0) > 0:
+                row['Blocked Time (h)'] = f"{throughput['blocked_hours']:.1f}"
+
+            throughput_data.append(row)
+
         throughput_df = pd.DataFrame(throughput_data)
         st.dataframe(throughput_df, use_container_width=True, hide_index=True)
+
+        # Add note about current state tracking limitations
+        if any(tp.get('blocked_hours', 0) == 0 for tp in cell_throughputs.values()):
+            st.caption("ℹ️ **Note**: Pick's active throughput currently includes waiting time due to tandem operation with Cut. Future state tracking improvements will separate actual picking time from blocked/waiting time.")
         
         # Bottleneck and improvement opportunity
         st.divider()
