@@ -992,7 +992,32 @@ if st.session_state.print_df is not None:
         
         # Display timelines
         if cell_data:
-            display_all_cell_timelines(cell_data)
+            # Get break times from session state and convert to datetime
+            break_start_time = st.session_state.get('break_start')
+            break_end_time = st.session_state.get('break_end')
+
+            break_start_dt = None
+            break_end_dt = None
+            if break_start_time and break_end_time:
+                from datetime import datetime
+                from dateutil.tz import gettz
+                copenhagen_tz = gettz('Europe/Copenhagen')
+
+                # Use system start date for break datetime
+                if 'cell_timestamps' in st.session_state and st.session_state.cell_timestamps:
+                    system_start = st.session_state.cell_timestamps.get('system_start')
+                    if system_start:
+                        break_date = system_start.date()
+                        break_start_dt = datetime.combine(break_date, break_start_time)
+                        break_end_dt = datetime.combine(break_date, break_end_time)
+
+                        # Ensure timezone-aware
+                        if break_start_dt.tzinfo is None:
+                            break_start_dt = break_start_dt.replace(tzinfo=copenhagen_tz)
+                        if break_end_dt.tzinfo is None:
+                            break_end_dt = break_end_dt.replace(tzinfo=copenhagen_tz)
+
+            display_all_cell_timelines(cell_data, break_start=break_start_dt, break_end=break_end_dt)
         else:
             st.warning("No equipment state data available for selected batches")
     

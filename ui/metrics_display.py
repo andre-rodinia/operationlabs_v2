@@ -20,23 +20,28 @@ def display_cell_timeline(
     hourly_df: pd.DataFrame,
     summary: Dict[str, float],
     start_ts: datetime,
-    end_ts: datetime
+    end_ts: datetime,
+    break_start: Optional[datetime] = None,
+    break_end: Optional[datetime] = None
 ):
     """
     Display one cell's equipment state timeline.
-    
+
     Shows:
     - Four metrics at top: time window, running percent, idle percent, fault percent
     - Stacked bar chart with hours on x-axis and percentages on y-axis
     - Colors: green for running, yellow for idle, red for fault, gray for other
+    - Break period shown as gray shaded region (if applicable)
     - List of problematic hours with high idle or fault
-    
+
     Args:
         cell_name: Cell name (e.g., "Print1", "Cut1", "Pick1")
         hourly_df: DataFrame from calculate_hourly_state_breakdown
         summary: Dictionary from calculate_state_summary
         start_ts: Start timestamp
         end_ts: End timestamp
+        break_start: Break start timestamp (optional)
+        break_end: Break end timestamp (optional)
     """
     st.subheader(f"📊 {cell_name} Equipment State Timeline")
     
@@ -99,7 +104,26 @@ def display_cell_timeline(
         # Set x-axis range to match the actual time window
         x_min = hourly_df['hour_start'].min()
         x_max = hourly_df['hour_end'].max()
-        
+
+        # Add break period shading if break overlaps with this cell's window
+        if break_start and break_end:
+            # Check if break overlaps with cell window
+            overlap_start = max(start_ts, break_start)
+            overlap_end = min(end_ts, break_end)
+
+            if overlap_end > overlap_start:
+                # Add gray shaded region for break period
+                fig.add_vrect(
+                    x0=overlap_start,
+                    x1=overlap_end,
+                    fillcolor="gray",
+                    opacity=0.3,
+                    layer="below",
+                    line_width=0,
+                    annotation_text="Break",
+                    annotation_position="top"
+                )
+
         fig.update_layout(
             barmode='stack',
             xaxis_title='Hour',
@@ -137,20 +161,24 @@ def display_cell_timeline(
 
 
 def display_all_cell_timelines(
-    cell_data: Dict[str, Dict]
+    cell_data: Dict[str, Dict],
+    break_start: Optional[datetime] = None,
+    break_end: Optional[datetime] = None
 ):
     """
     Loop through Print, Cut, Pick and display timeline for each.
-    
+
     Args:
         cell_data: Dictionary with keys 'Print1', 'Cut1', 'Pick1', each containing:
                    - 'hourly_df': DataFrame from calculate_hourly_state_breakdown
                    - 'summary': Dictionary from calculate_state_summary
                    - 'start_ts': Start timestamp
                    - 'end_ts': End timestamp
+        break_start: Break start timestamp (optional)
+        break_end: Break end timestamp (optional)
     """
     cells = ['Print1', 'Cut1', 'Pick1']
-    
+
     for i, cell_name in enumerate(cells):
         if cell_name in cell_data and cell_data[cell_name] is not None:
             display_cell_timeline(
@@ -158,9 +186,11 @@ def display_all_cell_timelines(
                 hourly_df=cell_data[cell_name]['hourly_df'],
                 summary=cell_data[cell_name]['summary'],
                 start_ts=cell_data[cell_name]['start_ts'],
-                end_ts=cell_data[cell_name]['end_ts']
+                end_ts=cell_data[cell_name]['end_ts'],
+                break_start=break_start,
+                break_end=break_end
             )
-            
+
             # Add divider between cells (except after last one)
             if i < len(cells) - 1:
                 st.divider()
