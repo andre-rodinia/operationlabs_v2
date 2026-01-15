@@ -96,11 +96,11 @@ def calculate_hourly_state_breakdown(
         - break_seconds: Seconds in break period
         - total_seconds: Total seconds in hour
         - productive_seconds: Total seconds excluding break
-        - running_percent: Percentage running (of productive time)
-        - idle_percent: Percentage idle (of productive time)
-        - fault_percent: Percentage fault (of productive time)
-        - blocked_percent: Percentage blocked (of productive time)
-        - other_percent: Percentage other (of productive time)
+        - running_percent: Percentage running (of total time)
+        - idle_percent: Percentage idle (of total time)
+        - fault_percent: Percentage fault (of total time)
+        - blocked_percent: Percentage blocked (of total time)
+        - other_percent: Percentage other (of total time)
         - break_percent: Percentage break (of total time)
     """
     if states_df.empty:
@@ -187,22 +187,16 @@ def calculate_hourly_state_breakdown(
             if gap_sec > 0:
                 other_sec += gap_sec
         
-        # Calculate percentages based on productive time (excluding breaks)
-        # State percentages are relative to productive time
-        if productive_sec > 0:
-            running_pct = (running_sec / productive_sec) * 100
-            idle_pct = (idle_sec / productive_sec) * 100
-            fault_pct = (fault_sec / productive_sec) * 100
-            blocked_pct = (blocked_sec / productive_sec) * 100
-            other_pct = (other_sec / productive_sec) * 100
-        else:
-            running_pct = idle_pct = fault_pct = blocked_pct = other_pct = 0.0
-
-        # Break percentage is relative to total time (for stacked bar visualization)
+        # Calculate percentages - all based on total time for stacked bar visualization
         if total_sec > 0:
+            running_pct = (running_sec / total_sec) * 100
+            idle_pct = (idle_sec / total_sec) * 100
+            fault_pct = (fault_sec / total_sec) * 100
+            blocked_pct = (blocked_sec / total_sec) * 100
+            other_pct = (other_sec / total_sec) * 100
             break_pct = (break_sec / total_sec) * 100
         else:
-            break_pct = 0.0
+            running_pct = idle_pct = fault_pct = blocked_pct = other_pct = break_pct = 0.0
 
         hourly_data.append({
             'hour_start': current_hour,
