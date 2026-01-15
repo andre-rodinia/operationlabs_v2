@@ -1251,9 +1251,6 @@ def fetch_robot_equipment_states(
                     # Idle, blocked, etc. are NOT counted (machine is available but not producing)
                     downtime_sec += duration_float
 
-            logger.info(f"Equipment states for {cell}: {all_states}")
-            logger.info(f"  Running: {running_time_sec:.1f}s, Down: {downtime_sec:.1f}s")
-
             return {
                 'running_time_sec': running_time_sec,
                 'downtime_sec': downtime_sec
