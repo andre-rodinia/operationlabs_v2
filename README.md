@@ -111,7 +111,8 @@ where:
 ```
 OEE = Availability × Performance × Quality
 where:
-  Availability    = Running Time / Total Time (from equipment states)
+  Availability    = Running Time / (Running Time + Downtime)
+                    [from equipment states query, excludes idle time]
   Performance     = 100% (fixed - robots operate at consistent speed)
   Quality         = Pick Success Rate × QC Pass Rate (compound quality)
 ```
@@ -128,11 +129,15 @@ where:
 - **QC-Based Quality**: Quality calculated from batch-level QC data
 - **Actual vs Capped Performance**: Print performance shown both actual (uncapped) and capped (for OEE)
 
-### Daily-Level Metrics
+### Daily-Level Metrics (Break-Aware)
 
-- **Utilization**: Production hours / Available hours
-- **Daily OEE**: Batch OEE × Utilization
-- **Idle Time Tracking**: Time not spent in production
+- **Production Hours**: Sum of all batch production times per cell
+- **Break Overlap**: Hours of break time that overlap with production
+- **Active Production Hours**: Production hours minus break overlap
+- **Scheduled Idle**: Scheduled hours not used for production
+- **Utilization**: Active production hours / Scheduled hours × 100%
+- **Weighted Batch OEE**: Duration-weighted average of batch OEE values
+- **Daily OEE**: Weighted Batch OEE × Utilization / 100
 
 ## Usage Guide
 
@@ -200,8 +205,13 @@ The application uses a `Config` class in `config.py` that reads from environment
 
 - **Database Connections**: HISTORIAN and INSIDE database credentials
 - **Timezone**: Default timezone for date/time operations (default: Europe/Copenhagen)
-- **Operating Hours**: Default hours per day for utilization (default: 24)
+- **Shift Schedule**: Default shift start/end times and break duration
+  - `DEFAULT_SHIFT_START`: Shift start time (default: 09:00)
+  - `DEFAULT_SHIFT_END`: Shift end time (default: 16:00)
+  - `DEFAULT_BREAK_DURATION_HOURS`: Break duration in hours (default: 0.5)
+- **Operating Hours**: Deprecated - use shift schedule instead (default: 24)
 - **Logging**: Log level configuration (default: INFO)
+- **MQTT Topics**: Topic paths for Print, Cut, and Pick JobReports
 
 ## Development Status
 
@@ -210,7 +220,8 @@ The application uses a `Config` class in `config.py` that reads from environment
 - [x] Multi-cell job tracking (Print, Cut, Pick)
 - [x] Job-level OEE calculations
 - [x] Batch-level OEE with weighted averages
-- [x] Daily-level OEE with utilization
+- [x] Daily-level OEE with break-aware utilization
+- [x] Equipment state-based Pick availability calculation
 - [x] QC quality overlay system
 - [x] Quality breakdown by defect type
 - [x] Database connection pooling
@@ -221,12 +232,16 @@ The application uses a `Config` class in `config.py` that reads from environment
 - [x] Batch structure analysis
 - [x] FPY (First Pass Yield) calculations
 - [x] Component-level QC tracking
+- [x] Break overlap calculation per cell
+- [x] Shift schedule configuration
 
 ### 🔄 Current Capabilities
 - Batch-centric OEE analysis workflow
+- Break-aware daily-level OEE calculations
 - Automatic QC data application when available
 - Print performance capping at 100% for batch-level calculations
-- Equipment state-based Pick availability calculation
+- Equipment state-based Pick availability with proper idle time exclusion
+- Consistent production time calculation across all cells
 - Comprehensive logging and error handling
 
 ### 📋 Potential Future Enhancements
@@ -238,6 +253,25 @@ The application uses a `Config` class in `config.py` that reads from environment
 - [ ] Historical trend analysis
 
 ## Technical Details
+
+### Production Time Calculation Methodology
+
+The application ensures consistent production time calculation across all cells:
+
+**Print & Cut:**
+- Production time = `uptime_sec + downtime_sec` from job reports
+- Only counts time during actual job processing
+- Excludes gaps between jobs
+
+**Pick:**
+- Production time = `running_time_sec + downtime_sec` from equipment states
+- Equipment states queried for entire batch time window
+- Only counts time robot was running or down (machine failure)
+- **Excludes idle state** (robot available but not producing)
+- This ensures consistency with Print/Cut methodology
+
+**Why This Matters:**
+Previously, Pick used the full time window (first job start to last job end) which included idle gaps, causing Pick to show ~1 hour more production time than other cells. The current approach ensures all cells measure production time the same way: active time + downtime only.
 
 ### OEE Calculation Flow
 
@@ -251,15 +285,31 @@ The application uses a `Config` class in `config.py` that reads from environment
    - **Performance**: Weighted average by uptime_sec (Print uses capped performance)
    - **Quality**: From batch-level QC data (total_components - defects) / total_components
 
-3. **Daily-Level Calculation**:
-   - **Utilization**: Sum of production hours / available hours
-   - **Daily OEE**: Average batch OEE × Utilization
+3. **Daily-Level Calculation** (Break-Aware):
+   - **Production Hours**: Sum of (running_time + downtime) across all batches
+   - **Break Overlap**: Calculated per cell based on batch time windows
+   - **Active Production Hours**: Production hours - break overlap
+   - **Utilization**: Active production hours / scheduled hours × 100%
+   - **Weighted Batch OEE**: Σ(batch_oee × batch_duration) / Σ(batch_duration)
+   - **Daily OEE**: Weighted Batch OEE × Utilization / 100
 
 ### Quality Overlay Logic
 
 - **Print/Cut**: QC pass rate replaces 100% quality assumption
 - **Pick**: QC pass rate × pick success rate (compound quality)
 - Applied automatically when QC data is available (typically Day 3+)
+
+### Equipment State-Based Pick Availability
+
+Pick availability is calculated using equipment state transitions from the HISTORIAN database:
+- **Running State**: Robot actively picking components
+- **Down State**: Robot failure or unavailable (counted as downtime)
+- **Idle State**: Robot available but not producing (excluded from availability calculation)
+- **Time Window**: Query includes last state before batch start + all states during batch
+- **Duration Calculation**: State durations clipped to batch boundaries using LEAST/GREATEST
+- **Production Time**: Only running + down time (excludes idle gaps between jobs)
+
+This approach ensures Pick's production time calculation is consistent with Print/Cut methodology, where only actual production time (active + down) is counted, not idle periods.
 
 ### Performance Capping
 
