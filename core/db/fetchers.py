@@ -3090,22 +3090,22 @@ def fetch_equipment_states_with_durations(
             columns = ['ts', 'state', 'description', 'duration_seconds', 'next_ts']
             df = pd.DataFrame(results, columns=columns)
             
-            # Convert timestamp columns to datetime and normalize to UTC+1 (Europe/Copenhagen)
-            # Database timestamps are typically in UTC, but we want to work in UTC+1
+            # Convert timestamp columns to datetime
+            # Database returns timestamps with timezone info, pandas will preserve it
             copenhagen_tz = gettz('Europe/Copenhagen')
-            
+
             df['ts'] = pd.to_datetime(df['ts'], errors='coerce')
             df['next_ts'] = pd.to_datetime(df['next_ts'], errors='coerce')
-            
-            # Normalize timestamps to UTC+1
-            # If timestamps are naive (no timezone), assume they're UTC and convert to UTC+1
-            # If they're timezone-aware, convert to UTC+1
+
+            # Ensure timestamps are timezone-aware in UTC+1
+            # The database should already return timestamps in the correct timezone
             for col in ['ts', 'next_ts']:
                 if df[col].dt.tz is None:
-                    # Naive datetime - assume UTC and convert to UTC+1
-                    df[col] = df[col].dt.tz_localize('UTC').dt.tz_convert(copenhagen_tz)
+                    # Naive datetime - assume it's already in UTC+1 (local time from database)
+                    # DO NOT assume UTC - the database stores timestamps in local time (UTC+1)
+                    df[col] = df[col].dt.tz_localize(copenhagen_tz)
                 else:
-                    # Timezone-aware - convert to UTC+1
+                    # Timezone-aware - ensure it's in UTC+1
                     df[col] = df[col].dt.tz_convert(copenhagen_tz)
             
             # Ensure duration_seconds is numeric
