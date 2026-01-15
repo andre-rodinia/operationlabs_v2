@@ -68,7 +68,18 @@ def display_cell_timeline(
         # Use datetime values directly for x-axis (Plotly handles this better)
         x_values = hourly_df['hour_start']
         
-        # Add stacked bars
+        # Add stacked bars - break first (bottom of stack), then productive states
+        # Break shown as separate category
+        if 'break_percent' in hourly_df.columns:
+            fig.add_trace(go.Bar(
+                x=x_values,
+                y=hourly_df['break_percent'],
+                name='Break',
+                marker_color='#d3d3d3',  # Light gray
+                marker_pattern_shape="/",  # Diagonal stripes pattern
+                hovertemplate='%{x|%H:%M}<br>%{y:.1f}% Break<extra></extra>'
+            ))
+
         fig.add_trace(go.Bar(
             x=x_values,
             y=hourly_df['running_percent'],
@@ -76,7 +87,7 @@ def display_cell_timeline(
             marker_color='#28a745',  # Green
             hovertemplate='%{x|%H:%M}<br>%{y:.1f}% Running<extra></extra>'
         ))
-        
+
         fig.add_trace(go.Bar(
             x=x_values,
             y=hourly_df['idle_percent'],
@@ -84,7 +95,7 @@ def display_cell_timeline(
             marker_color='#ffc107',  # Yellow
             hovertemplate='%{x|%H:%M}<br>%{y:.1f}% Idle<extra></extra>'
         ))
-        
+
         fig.add_trace(go.Bar(
             x=x_values,
             y=hourly_df['fault_percent'],
@@ -92,7 +103,7 @@ def display_cell_timeline(
             marker_color='#dc3545',  # Red
             hovertemplate='%{x|%H:%M}<br>%{y:.1f}% Fault<extra></extra>'
         ))
-        
+
         fig.add_trace(go.Bar(
             x=x_values,
             y=hourly_df['other_percent'],
@@ -104,39 +115,6 @@ def display_cell_timeline(
         # Set x-axis range to match the actual time window
         x_min = hourly_df['hour_start'].min()
         x_max = hourly_df['hour_end'].max()
-
-        # Add break period shading if break overlaps with this cell's window
-        if break_start and break_end:
-            # Check if break overlaps with cell window
-            overlap_start = max(start_ts, break_start)
-            overlap_end = min(end_ts, break_end)
-
-            if overlap_end > overlap_start:
-                # Add striped/hatched pattern for break period - more visible
-                fig.add_vrect(
-                    x0=overlap_start,
-                    x1=overlap_end,
-                    fillcolor="lightgray",
-                    opacity=0.5,
-                    layer="above",
-                    line_width=2,
-                    line_dash="dash",
-                    line_color="darkgray"
-                )
-
-                # Add text annotation separately
-                fig.add_annotation(
-                    x=overlap_start + (overlap_end - overlap_start) / 2,
-                    y=1.08,
-                    yref="paper",
-                    text="🕐 BREAK",
-                    showarrow=False,
-                    font=dict(size=12, color="darkgray", family="Arial Black"),
-                    bgcolor="white",
-                    bordercolor="darkgray",
-                    borderwidth=1,
-                    borderpad=4
-                )
 
         fig.update_layout(
             barmode='stack',

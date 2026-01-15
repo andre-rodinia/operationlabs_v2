@@ -64,22 +64,26 @@ def categorize_state(state_name: str) -> str:
 def calculate_hourly_state_breakdown(
     states_df: pd.DataFrame,
     start_ts: datetime,
-    end_ts: datetime
+    end_ts: datetime,
+    break_start: Optional[datetime] = None,
+    break_end: Optional[datetime] = None
 ) -> pd.DataFrame:
     """
     Split equipment states into hourly buckets and calculate time spent in each category.
-    
+
     For each hour between start_ts and end_ts:
-    - Calculate seconds spent in "running", "idle", "fault", "other"
-    - Calculate percentages for each category
+    - Calculate seconds spent in "running", "idle", "fault", "other", "break"
+    - Calculate percentages for each category (based on productive time, excluding breaks)
     - Return DataFrame with one row per hour
-    
+
     Args:
         states_df: DataFrame from fetch_equipment_states_with_durations with columns:
                    ts, state, description, duration_seconds, next_ts
         start_ts: Start timestamp for the analysis window
         end_ts: End timestamp for the analysis window
-        
+        break_start: Optional start timestamp of break period
+        break_end: Optional end timestamp of break period
+
     Returns:
         DataFrame with columns:
         - hour_start: Start of the hour
@@ -87,12 +91,17 @@ def calculate_hourly_state_breakdown(
         - running_seconds: Seconds in running state
         - idle_seconds: Seconds in idle state
         - fault_seconds: Seconds in fault state
+        - blocked_seconds: Seconds in blocked state
         - other_seconds: Seconds in other state
+        - break_seconds: Seconds in break period
         - total_seconds: Total seconds in hour
-        - running_percent: Percentage running
-        - idle_percent: Percentage idle
-        - fault_percent: Percentage fault
-        - other_percent: Percentage other
+        - productive_seconds: Total seconds excluding break
+        - running_percent: Percentage running (of productive time)
+        - idle_percent: Percentage idle (of productive time)
+        - fault_percent: Percentage fault (of productive time)
+        - blocked_percent: Percentage blocked (of productive time)
+        - other_percent: Percentage other (of productive time)
+        - break_percent: Percentage break (of total time)
     """
     if states_df.empty:
         logger.warning("Empty states DataFrame provided")
@@ -120,7 +129,19 @@ def calculate_hourly_state_breakdown(
         ].copy()
         
         total_sec = (hour_end_actual - hour_start_actual).total_seconds()
-        
+
+        # Calculate break overlap with this hour
+        break_sec = 0.0
+        if break_start and break_end:
+            # Calculate overlap between this hour and the break period
+            overlap_start = max(hour_start_actual, break_start)
+            overlap_end = min(hour_end_actual, break_end)
+            if overlap_end > overlap_start:
+                break_sec = (overlap_end - overlap_start).total_seconds()
+
+        # Productive time is total time minus break time
+        productive_sec = total_sec - break_sec
+
         if hour_states.empty:
             # No states in this hour - assign all time to "other"
             running_sec = 0.0
@@ -166,15 +187,22 @@ def calculate_hourly_state_breakdown(
             if gap_sec > 0:
                 other_sec += gap_sec
         
-        # Calculate percentages
-        if total_sec > 0:
-            running_pct = (running_sec / total_sec) * 100
-            idle_pct = (idle_sec / total_sec) * 100
-            fault_pct = (fault_sec / total_sec) * 100
-            blocked_pct = (blocked_sec / total_sec) * 100
-            other_pct = (other_sec / total_sec) * 100
+        # Calculate percentages based on productive time (excluding breaks)
+        # State percentages are relative to productive time
+        if productive_sec > 0:
+            running_pct = (running_sec / productive_sec) * 100
+            idle_pct = (idle_sec / productive_sec) * 100
+            fault_pct = (fault_sec / productive_sec) * 100
+            blocked_pct = (blocked_sec / productive_sec) * 100
+            other_pct = (other_sec / productive_sec) * 100
         else:
             running_pct = idle_pct = fault_pct = blocked_pct = other_pct = 0.0
+
+        # Break percentage is relative to total time (for stacked bar visualization)
+        if total_sec > 0:
+            break_pct = (break_sec / total_sec) * 100
+        else:
+            break_pct = 0.0
 
         hourly_data.append({
             'hour_start': current_hour,
@@ -184,12 +212,15 @@ def calculate_hourly_state_breakdown(
             'fault_seconds': fault_sec,
             'blocked_seconds': blocked_sec,
             'other_seconds': other_sec,
+            'break_seconds': break_sec,
             'total_seconds': total_sec,
+            'productive_seconds': productive_sec,
             'running_percent': running_pct,
             'idle_percent': idle_pct,
             'fault_percent': fault_pct,
             'blocked_percent': blocked_pct,
-            'other_percent': other_pct
+            'other_percent': other_pct,
+            'break_percent': break_pct
         })
         
         current_hour = hour_end

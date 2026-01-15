@@ -939,12 +939,7 @@ if st.session_state.print_df is not None:
                         )
                         
                         if not states_df.empty:
-                            # Calculate hourly breakdown
-                            hourly_df = calculate_hourly_state_breakdown(
-                                states_df, start_ts, end_ts
-                            )
-                            
-                            # Calculate summary (pass start_ts, end_ts, and break window)
+                            # Get break times from session state
                             break_start_time = st.session_state.get('break_start')
                             break_end_time = st.session_state.get('break_end')
 
@@ -966,6 +961,16 @@ if st.session_state.print_df is not None:
                                 if break_end_dt.tzinfo is None:
                                     break_end_dt = break_end_dt.replace(tzinfo=copenhagen_tz)
 
+                            # Calculate hourly breakdown with break parameters
+                            hourly_df = calculate_hourly_state_breakdown(
+                                states_df,
+                                start_ts,
+                                end_ts,
+                                break_start=break_start_dt,
+                                break_end=break_end_dt
+                            )
+
+                            # Calculate summary (pass start_ts, end_ts, and break window)
                             summary = calculate_state_summary(
                                 states_df,
                                 start_ts,
