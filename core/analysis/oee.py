@@ -502,9 +502,7 @@ def calculate_daily_utilization(
             'batch_oee': batch_oee,
             'daily_oee': daily_oee
         }
-        
-        if debug_mode:
-    
+
     # Calculate summary
     cells_with_data = [c for c in ['print', 'cut', 'pick'] if results[c]['production_time_min'] > 0]
     
