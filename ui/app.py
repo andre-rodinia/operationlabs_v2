@@ -76,15 +76,55 @@ st.markdown("---")
 with st.sidebar:
     st.header("⚙️ Configuration")
 
-    # Operating hours
-    operating_hours = st.number_input(
-        "Operating Hours per Day",
-        min_value=1.0,
-        max_value=24.0,
-        value=Config.DEFAULT_OPERATING_HOURS,
-        step=0.5,
-        help="Total available hours for daily utilization calculation"
+    # Shift Schedule Configuration
+    st.subheader("📅 Shift Schedule")
+
+    from datetime import time as dt_time
+
+    shift_start_time = st.time_input(
+        "Shift Start Time",
+        value=dt_time(int(Config.DEFAULT_SHIFT_START.split(':')[0]), int(Config.DEFAULT_SHIFT_START.split(':')[1])),
+        help="When production shift begins"
     )
+
+    shift_end_time = st.time_input(
+        "Shift End Time",
+        value=dt_time(int(Config.DEFAULT_SHIFT_END.split(':')[0]), int(Config.DEFAULT_SHIFT_END.split(':')[1])),
+        help="When production shift ends"
+    )
+
+    break_duration_hours = st.number_input(
+        "Break Duration (hours)",
+        min_value=0.0,
+        max_value=2.0,
+        value=Config.DEFAULT_BREAK_DURATION_HOURS,
+        step=0.25,
+        help="Scheduled lunch break duration"
+    )
+
+    # Calculate and display scheduled hours
+    from datetime import datetime, timedelta
+    shift_start_dt = datetime.combine(datetime.today(), shift_start_time)
+    shift_end_dt = datetime.combine(datetime.today(), shift_end_time)
+
+    if shift_end_dt <= shift_start_dt:
+        st.error("⚠️ Shift end time must be after start time")
+        scheduled_hours = 0.0
+    else:
+        shift_duration_hours = (shift_end_dt - shift_start_dt).total_seconds() / 3600
+        if break_duration_hours > shift_duration_hours:
+            st.warning(f"⚠️ Break duration ({break_duration_hours}h) exceeds shift duration ({shift_duration_hours:.1f}h)")
+            scheduled_hours = max(0, shift_duration_hours - break_duration_hours)
+        else:
+            scheduled_hours = shift_duration_hours - break_duration_hours
+
+    st.info(f"ℹ️ **Scheduled Hours:** {scheduled_hours:.2f}h\n\n({shift_duration_hours:.1f}h shift - {break_duration_hours:.1f}h break)")
+
+    # Store in session state
+    st.session_state.shift_start_time = shift_start_time
+    st.session_state.shift_end_time = shift_end_time
+    st.session_state.break_duration_hours = break_duration_hours
+    st.session_state.scheduled_hours = scheduled_hours
 
     st.markdown("---")
 
@@ -434,7 +474,38 @@ if st.session_state.print_df is not None:
         quality_breakdown=quality_breakdown
     )
 
-    daily_metrics = calculate_daily_metrics(batch_metrics_df, operating_hours)
+    # Get shift configuration and break times from session state
+    scheduled_hours = st.session_state.get('scheduled_hours', 6.5)  # Default 6.5h
+    break_start_time = st.session_state.get('break_start')
+    break_end_time = st.session_state.get('break_end')
+
+    # Convert break times to datetime if available
+    break_start_dt = None
+    break_end_dt = None
+    if break_start_time and break_end_time and not st.session_state.batches_df.empty:
+        from dateutil.tz import gettz
+        copenhagen_tz = gettz('Europe/Copenhagen')
+
+        # Use first batch date for break datetime construction
+        batches_df = st.session_state.batches_df
+        if 'print_start' in batches_df.columns:
+            batch_date = pd.to_datetime(batches_df['print_start'].iloc[0]).date()
+            break_start_dt = datetime.combine(batch_date, break_start_time)
+            break_end_dt = datetime.combine(batch_date, break_end_time)
+
+            # Ensure timezone-aware
+            if break_start_dt.tzinfo is None:
+                break_start_dt = break_start_dt.replace(tzinfo=copenhagen_tz)
+            if break_end_dt.tzinfo is None:
+                break_end_dt = break_end_dt.replace(tzinfo=copenhagen_tz)
+
+    daily_metrics = calculate_daily_metrics(
+        batch_metrics_df,
+        scheduled_hours,
+        break_start=break_start_dt,
+        break_end=break_end_dt,
+        batches_df=st.session_state.batches_df
+    )
 
     # ========================================================================
     # 4.1: BATCH-LEVEL METRICS
@@ -511,30 +582,58 @@ if st.session_state.print_df is not None:
     # 4.2: DAILY-LEVEL METRICS
     # ========================================================================
 
-    st.subheader("📅 Daily-Level OEE Metrics (with Utilization)")
+    st.subheader("📅 Daily-Level OEE Metrics (Break-Aware)")
+
+    # Add metric definitions expander
+    with st.expander("ℹ️ Metric Definitions"):
+        st.markdown(f"""
+        **Metric Definitions:**
+        - **Weighted Batch OEE**: Duration-weighted average OEE across all batches
+          - Formula: Σ(OEE × batch_duration) / Σ(batch_duration)
+        - **Production Hours**: Total time cell was running (includes break overlap)
+        - **Active Production Hours**: Production hours minus actual break time taken
+          - Formula: Production Hours - Break Overlap
+        - **Break Overlap**: Break time that occurred during production
+        - **Scheduled Idle**: Unused time within shift schedule
+          - Formula: Scheduled Hours - Active Production Hours
+        - **Utilization**: Efficiency of shift usage (excluding breaks)
+          - Formula: Active Production Hours / Scheduled Hours × 100%
+        - **Daily OEE**: Overall daily effectiveness
+          - Formula: Weighted Batch OEE × Utilization / 100
+
+        **Shift Configuration:**
+        - Scheduled Hours: {scheduled_hours:.2f}h (configured in sidebar)
+        - Break Duration: {st.session_state.get('break_duration_hours', 0.5):.2f}h
+        """)
 
     daily_df = pd.DataFrame([
         {
             'Cell': '🖨️ Print',
-            'Batch OEE': daily_metrics['print']['batch_oee'],
+            'Weighted Batch OEE': daily_metrics['print']['batch_oee'],
             'Production Hours': daily_metrics['print']['production_hours'],
-            'Idle Hours': daily_metrics['print']['idle_hours'],
+            'Active Production Hours': daily_metrics['print']['active_production_hours'],
+            'Break Overlap': daily_metrics['print']['break_overlap_hours'],
+            'Scheduled Idle': daily_metrics['print']['scheduled_idle_hours'],
             'Utilization': daily_metrics['print']['utilization'],
             'Daily OEE': daily_metrics['print']['daily_oee']
         },
         {
             'Cell': '✂️ Cut',
-            'Batch OEE': daily_metrics['cut']['batch_oee'],
+            'Weighted Batch OEE': daily_metrics['cut']['batch_oee'],
             'Production Hours': daily_metrics['cut']['production_hours'],
-            'Idle Hours': daily_metrics['cut']['idle_hours'],
+            'Active Production Hours': daily_metrics['cut']['active_production_hours'],
+            'Break Overlap': daily_metrics['cut']['break_overlap_hours'],
+            'Scheduled Idle': daily_metrics['cut']['scheduled_idle_hours'],
             'Utilization': daily_metrics['cut']['utilization'],
             'Daily OEE': daily_metrics['cut']['daily_oee']
         },
         {
             'Cell': '🤖 Pick',
-            'Batch OEE': daily_metrics['pick']['batch_oee'],
+            'Weighted Batch OEE': daily_metrics['pick']['batch_oee'],
             'Production Hours': daily_metrics['pick']['production_hours'],
-            'Idle Hours': daily_metrics['pick']['idle_hours'],
+            'Active Production Hours': daily_metrics['pick']['active_production_hours'],
+            'Break Overlap': daily_metrics['pick']['break_overlap_hours'],
+            'Scheduled Idle': daily_metrics['pick']['scheduled_idle_hours'],
             'Utilization': daily_metrics['pick']['utilization'],
             'Daily OEE': daily_metrics['pick']['daily_oee']
         }
@@ -542,9 +641,11 @@ if st.session_state.print_df is not None:
 
     st.dataframe(
         daily_df.style.format({
-            'Batch OEE': '{:.2f}%',
+            'Weighted Batch OEE': '{:.2f}%',
             'Production Hours': '{:.2f}h',
-            'Idle Hours': '{:.2f}h',
+            'Active Production Hours': '{:.2f}h',
+            'Break Overlap': '{:.2f}h',
+            'Scheduled Idle': '{:.2f}h',
             'Utilization': '{:.2f}%',
             'Daily OEE': '{:.2f}%'
         }),

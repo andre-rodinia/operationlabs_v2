@@ -4,11 +4,58 @@ Aggregates job-level OEE into batch-level and daily-level metrics
 """
 import pandas as pd
 import logging
-from typing import Dict
+from typing import Dict, Optional
+from datetime import datetime
 
 from core.db.fetchers import get_batch_pick_time_window, fetch_robot_equipment_states
 
 logger = logging.getLogger(__name__)
+
+
+def calculate_break_overlap_per_cell(
+    cell_start: Optional[pd.Timestamp],
+    cell_end: Optional[pd.Timestamp],
+    break_start: Optional[datetime],
+    break_end: Optional[datetime]
+) -> float:
+    """
+    Calculate overlap between break window and cell production window.
+
+    Args:
+        cell_start: Start timestamp of cell production
+        cell_end: End timestamp of cell production
+        break_start: Start of break period
+        break_end: End of break period
+
+    Returns:
+        Overlap duration in hours (0.0 if no overlap)
+
+    Edge Cases:
+    - Break outside production window: Returns 0.0
+    - Partial overlap: Returns only overlapping portion
+    - None values: Returns 0.0
+    """
+    if not all([cell_start, cell_end, break_start, break_end]):
+        return 0.0
+
+    # Convert pd.Timestamp to datetime if needed
+    if isinstance(cell_start, pd.Timestamp):
+        cell_start = cell_start.to_pydatetime()
+    if isinstance(cell_end, pd.Timestamp):
+        cell_end = cell_end.to_pydatetime()
+
+    # Calculate overlap
+    overlap_start = max(cell_start, break_start)
+    overlap_end = min(cell_end, break_end)
+
+    if overlap_end > overlap_start:
+        overlap_seconds = (overlap_end - overlap_start).total_seconds()
+        overlap_hours = overlap_seconds / 3600.0
+        logger.debug(f"Break overlap: {overlap_hours:.2f}h ({overlap_start} to {overlap_end})")
+        return overlap_hours
+
+    logger.debug("No break overlap with cell production window")
+    return 0.0
 
 def calculate_batch_metrics(
     print_df: pd.DataFrame,
@@ -310,45 +357,100 @@ def calculate_batch_metrics(
 
 def calculate_daily_metrics(
     batch_metrics_df: pd.DataFrame,
-    available_hours: float
+    scheduled_hours: float,
+    break_start: Optional[datetime] = None,
+    break_end: Optional[datetime] = None,
+    batches_df: Optional[pd.DataFrame] = None
 ) -> Dict:
     """
-    Calculate daily-level OEE metrics with utilization.
+    Calculate daily-level OEE metrics with break-aware utilization.
 
-    Formula:
-    - Utilization = Production Time / Available Time × 100%
-    - Daily OEE = Batch OEE × Utilization / 100
+    Formulas:
+    - Active Production Hours = Production Hours - Break Overlap
+    - Utilization = Active Production Hours / Scheduled Hours × 100%
+    - Weighted Batch OEE = Σ(OEE × duration) / Σ(duration)
+    - Daily OEE = Weighted Batch OEE × Utilization / 100
 
     Args:
         batch_metrics_df: Batch-level metrics DataFrame
-        available_hours: Total available hours in the day (e.g., 24)
+        scheduled_hours: Scheduled shift hours (shift duration - break duration)
+        break_start: Optional start timestamp of break period
+        break_end: Optional end timestamp of break period
+        batches_df: Optional DataFrame with batch timestamps for break overlap calculation
 
     Returns:
         Dictionary with daily metrics for each cell
 
     Edge Cases:
-    - available_hours = 0: Utilization = 0%
-    - Production time > available hours: Utilization > 100% (possible in multi-shift)
+    - scheduled_hours = 0: Utilization = 0%
+    - Production time > scheduled_hours: Utilization > 100% (overtime/multi-shift)
+    - No breaks configured: Break overlap = 0, Active = Production hours
+    - Break outside production window: Break overlap = 0
     """
+    # Helper function for weighted batch OEE
+    def weighted_batch_oee(df: pd.DataFrame, oee_col: str, time_col: str) -> float:
+        if df.empty or oee_col not in df.columns or time_col not in df.columns:
+            return 0.0
+        total_time = df[time_col].sum()
+        if total_time == 0:
+            return 0.0
+        weighted = (df[oee_col] * df[time_col]).sum() / total_time
+        logger.debug(f"Weighted {oee_col}: {weighted:.2f}% (vs simple mean: {df[oee_col].mean():.2f}%)")
+        return weighted
+
     # Calculate total production time (sum across batches)
     print_production_hours = batch_metrics_df['print_total_time_sec'].sum() / 3600
     cut_production_hours = batch_metrics_df['cut_total_time_sec'].sum() / 3600
     pick_production_hours = batch_metrics_df['pick_total_time_sec'].sum() / 3600
 
-    # Calculate utilization
-    print_utilization = (print_production_hours / available_hours * 100) if available_hours > 0 else 0
-    cut_utilization = (cut_production_hours / available_hours * 100) if available_hours > 0 else 0
-    pick_utilization = (pick_production_hours / available_hours * 100) if available_hours > 0 else 0
+    # Calculate break overlap for each cell
+    print_break_overlap = 0.0
+    cut_break_overlap = 0.0
+    pick_break_overlap = 0.0
 
-    # Calculate idle time
-    print_idle_hours = max(0, available_hours - print_production_hours)
-    cut_idle_hours = max(0, available_hours - cut_production_hours)
-    pick_idle_hours = max(0, available_hours - pick_production_hours)
+    if break_start and break_end and batches_df is not None and not batches_df.empty:
+        logger.info(f"Calculating break overlap for break window: {break_start} to {break_end}")
 
-    # Calculate batch OEE (average across batches)
-    print_batch_oee = batch_metrics_df['print_oee'].mean()
-    cut_batch_oee = batch_metrics_df['cut_oee'].mean()
-    pick_batch_oee = batch_metrics_df['pick_oee'].mean()
+        # Extract cell timestamps from batches_df
+        if 'print_start' in batches_df.columns and 'print_end' in batches_df.columns:
+            print_start = batches_df['print_start'].min()
+            print_end = batches_df['print_end'].max()
+            print_break_overlap = calculate_break_overlap_per_cell(print_start, print_end, break_start, break_end)
+            logger.info(f"Print break overlap: {print_break_overlap:.2f}h")
+
+        if 'cut_start' in batches_df.columns and 'cut_end' in batches_df.columns:
+            cut_start = batches_df['cut_start'].min()
+            cut_end = batches_df['cut_end'].max()
+            cut_break_overlap = calculate_break_overlap_per_cell(cut_start, cut_end, break_start, break_end)
+            logger.info(f"Cut break overlap: {cut_break_overlap:.2f}h")
+
+        if 'pick_start' in batches_df.columns and 'pick_end' in batches_df.columns:
+            pick_start = batches_df['pick_start'].min()
+            pick_end = batches_df['pick_end'].max()
+            pick_break_overlap = calculate_break_overlap_per_cell(pick_start, pick_end, break_start, break_end)
+            logger.info(f"Pick break overlap: {pick_break_overlap:.2f}h")
+
+    # Calculate active production hours (production minus break overlap)
+    print_active_hours = max(0, print_production_hours - print_break_overlap)
+    cut_active_hours = max(0, cut_production_hours - cut_break_overlap)
+    pick_active_hours = max(0, pick_production_hours - pick_break_overlap)
+
+    logger.info(f"Active production hours: Print={print_active_hours:.2f}h, Cut={cut_active_hours:.2f}h, Pick={pick_active_hours:.2f}h")
+
+    # Calculate utilization (active hours vs scheduled hours)
+    print_utilization = (print_active_hours / scheduled_hours * 100) if scheduled_hours > 0 else 0
+    cut_utilization = (cut_active_hours / scheduled_hours * 100) if scheduled_hours > 0 else 0
+    pick_utilization = (pick_active_hours / scheduled_hours * 100) if scheduled_hours > 0 else 0
+
+    # Calculate scheduled idle time (unused shift time)
+    print_scheduled_idle = max(0, scheduled_hours - print_active_hours)
+    cut_scheduled_idle = max(0, scheduled_hours - cut_active_hours)
+    pick_scheduled_idle = max(0, scheduled_hours - pick_active_hours)
+
+    # Calculate weighted batch OEE (duration-weighted average)
+    print_batch_oee = weighted_batch_oee(batch_metrics_df, 'print_oee', 'print_total_time_sec')
+    cut_batch_oee = weighted_batch_oee(batch_metrics_df, 'cut_oee', 'cut_total_time_sec')
+    pick_batch_oee = weighted_batch_oee(batch_metrics_df, 'pick_oee', 'pick_total_time_sec')
 
     # Calculate daily OEE
     print_daily_oee = (print_batch_oee * print_utilization) / 100
@@ -359,26 +461,33 @@ def calculate_daily_metrics(
         'print': {
             'batch_oee': print_batch_oee,
             'production_hours': print_production_hours,
-            'idle_hours': print_idle_hours,
+            'active_production_hours': print_active_hours,
+            'break_overlap_hours': print_break_overlap,
+            'scheduled_idle_hours': print_scheduled_idle,
             'utilization': print_utilization,
             'daily_oee': print_daily_oee
         },
         'cut': {
             'batch_oee': cut_batch_oee,
             'production_hours': cut_production_hours,
-            'idle_hours': cut_idle_hours,
+            'active_production_hours': cut_active_hours,
+            'break_overlap_hours': cut_break_overlap,
+            'scheduled_idle_hours': cut_scheduled_idle,
             'utilization': cut_utilization,
             'daily_oee': cut_daily_oee
         },
         'pick': {
             'batch_oee': pick_batch_oee,
             'production_hours': pick_production_hours,
-            'idle_hours': pick_idle_hours,
+            'active_production_hours': pick_active_hours,
+            'break_overlap_hours': pick_break_overlap,
+            'scheduled_idle_hours': pick_scheduled_idle,
             'utilization': pick_utilization,
             'daily_oee': pick_daily_oee
         }
     }
 
-    logger.info(f"Calculated daily metrics: Print={print_daily_oee:.2f}%, Cut={cut_daily_oee:.2f}%, Pick={pick_daily_oee:.2f}%")
+    logger.info(f"Calculated daily OEE: Print={print_daily_oee:.2f}%, Cut={cut_daily_oee:.2f}%, Pick={pick_daily_oee:.2f}%")
+    logger.info(f"Utilization: Print={print_utilization:.2f}%, Cut={cut_utilization:.2f}%, Pick={pick_utilization:.2f}%")
 
     return daily_metrics

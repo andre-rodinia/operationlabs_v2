@@ -26,8 +26,13 @@ class Config:
 
     # Application Settings
     TIMEZONE = os.getenv("TIMEZONE", "Europe/Copenhagen")
-    DEFAULT_OPERATING_HOURS = float(os.getenv("DEFAULT_OPERATING_HOURS", 24))
+    DEFAULT_OPERATING_HOURS = float(os.getenv("DEFAULT_OPERATING_HOURS", 24))  # Deprecated - use shift schedule instead
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+    # Shift Schedule Configuration
+    DEFAULT_SHIFT_START = os.getenv("DEFAULT_SHIFT_START", "09:00")
+    DEFAULT_SHIFT_END = os.getenv("DEFAULT_SHIFT_END", "16:00")
+    DEFAULT_BREAK_DURATION_HOURS = float(os.getenv("DEFAULT_BREAK_DURATION_HOURS", 0.5))
 
     # MQTT Topics
     TOPICS = {
