@@ -261,6 +261,7 @@ def calculate_batch_metrics(
             total_time_for_availability = running_time_sec + downtime_sec
             if total_time_for_availability > 0:
                 pick_availability = (running_time_sec / total_time_for_availability) * 100
+                logger.info(f"Pick batch {batch_id}: running={running_time_sec:.1f}s, downtime={downtime_sec:.1f}s, total={total_time_for_availability:.1f}s, availability={pick_availability:.2f}%")
             else:
                 pick_availability = 0
                 logger.warning(f"Total time for availability is 0 for batch {batch_id}")
