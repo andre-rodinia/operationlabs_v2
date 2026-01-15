@@ -1199,30 +1199,25 @@ def fetch_robot_equipment_states(
             
             query = """
                 WITH state_changes AS (
-                    SELECT 
-                        ts, 
-                        cell, 
+                    SELECT
+                        ts,
+                        cell,
                         state,
-                        LEAD(state) OVER (PARTITION BY cell ORDER BY ts ASC) AS next_state,
-                        LEAD(ts) OVER (PARTITION BY cell ORDER BY ts ASC) AS next_ts
+                        LEAD(ts) OVER (ORDER BY ts ASC) AS next_ts
                     FROM equipment e
                     WHERE e.cell = %s
                       AND e.ts >= %s::timestamp
                       AND e.ts <= %s::timestamp
                 )
-                SELECT 
+                SELECT
                     state,
-                    SUM(EXTRACT(EPOCH FROM (
-                        LEAST(COALESCE(next_ts, %s::timestamp), %s::timestamp) - 
-                        GREATEST(ts, %s::timestamp)
-                    ))) AS duration_seconds
+                    SUM(EXTRACT(EPOCH FROM (next_ts - ts))) AS duration_seconds
                 FROM state_changes
-                WHERE ts < %s::timestamp
-                  AND (next_ts IS NULL OR next_ts > %s::timestamp)
+                WHERE next_ts IS NOT NULL
                 GROUP BY state;
             """
-            
-            cursor.execute(query, [cell, start_ts, end_ts, end_ts, end_ts, start_ts, end_ts, start_ts])
+
+            cursor.execute(query, [cell, start_ts, end_ts])
             results = cursor.fetchall()
             cursor.close()
 
@@ -1233,7 +1228,8 @@ def fetch_robot_equipment_states(
                 duration_float = float(duration) if duration else 0.0
                 if state == 'running':
                     running_time_sec += duration_float
-                elif state == 'down':
+                else:
+                    # All non-running states count as downtime (idle, down, blocked, etc.)
                     downtime_sec += duration_float
             
             return {
