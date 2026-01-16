@@ -2521,13 +2521,15 @@ def fetch_batch_structure(batch_ids: List[str]) -> pd.DataFrame:
             
             # Query to get batch structure
             # For each style (item_order_id):
-            # 1. Count distinct component_id = number of components per style (fixed)
-            # 2. Count distinct rg_id = total unique rg_ids per style
-            # 3. Garments per style = unique rg_ids / components per style
+            # 1. Count ACTUAL component order records (for rework batches, not all components may be produced)
+            # 2. Count distinct component_id = number of unique component types per style
+            # 3. Count distinct rg_id = total unique rg_ids per style
+            # 4. Garments per style = unique rg_ids / components per style
             query = """
-                SELECT 
+                SELECT
                     pc.production_batch_id as batch_id,
                     pc.item_order_id as style_number,
+                    COUNT(*) as actual_components_in_batch,
                     COUNT(DISTINCT pc.component_id) as components_per_style,
                     COUNT(DISTINCT pc.rg_id) as unique_rg_ids_per_style,
                     COUNT(DISTINCT pc.rg_id)::float / NULLIF(COUNT(DISTINCT pc.component_id), 0) as garments_per_style
@@ -2547,32 +2549,29 @@ def fetch_batch_structure(batch_ids: List[str]) -> pd.DataFrame:
         if not results:
             logger.warning(f"No batch structure data found for batches: {batch_ids}")
             return pd.DataFrame()
-        
-        columns = ['batch_id', 'style_number', 'components_per_style', 'unique_rg_ids_per_style', 'garments_per_style']
+
+        columns = ['batch_id', 'style_number', 'actual_components_in_batch', 'components_per_style', 'unique_rg_ids_per_style', 'garments_per_style']
         df = pd.DataFrame(results, columns=columns)
-        
+
         # Round garments_per_style to integer (should be whole number)
         df['garments_per_style'] = df['garments_per_style'].fillna(0).round().astype(int)
-        
-        # Calculate total components per style = garments_per_style × components_per_style
-        df['total_components_per_style'] = df['garments_per_style'] * df['components_per_style']
-        
+
         # Calculate batch-level totals
         # Total styles = count of unique item_order_id per batch
-        # Total components (batch) = SUM of total_components_per_style (sum across all styles in batch)
+        # Total components (batch) = SUM of actual_components_in_batch (actual count, not calculated)
         batch_totals = df.groupby('batch_id').agg({
             'style_number': 'nunique',  # Total number of unique styles (item_order_id)
-            'total_components_per_style': 'sum'  # Sum of components per style = total components for batch
+            'actual_components_in_batch': 'sum'  # Sum of actual components = total for batch (works for rework batches)
         }).reset_index()
         batch_totals.columns = ['batch_id', 'total_styles', 'total_components']
         
         # Merge totals back into main dataframe
         df = df.merge(batch_totals, on='batch_id', how='left')
-        
+
         # Handle NULL values
+        df['actual_components_in_batch'] = df['actual_components_in_batch'].fillna(0).astype(int)
         df['components_per_style'] = df['components_per_style'].fillna(0).astype(int)
         df['unique_rg_ids_per_style'] = df['unique_rg_ids_per_style'].fillna(0).astype(int)
-        df['total_components_per_style'] = df['total_components_per_style'].fillna(0).astype(int)
         df['total_styles'] = df['total_styles'].fillna(0).astype(int)
         df['total_components'] = df['total_components'].fillna(0).astype(int)
         
