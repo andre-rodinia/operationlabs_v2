@@ -920,8 +920,8 @@ if st.session_state.print_df is not None:
                 # Display batch structure table
                 st.dataframe(
                     batch_structure_df[[
-                        'batch_id', 'style_number', 'components_per_style', 'garments_per_style', 
-                        'total_components_per_style'
+                        'batch_id', 'style_number', 'components_per_style', 'garments_per_style',
+                        'actual_components_in_batch'
                     ]],
                     use_container_width=True,
                     hide_index=True,
@@ -930,7 +930,7 @@ if st.session_state.print_df is not None:
                         "style_number": st.column_config.NumberColumn("Style # (item_order_id)", width="small"),
                         "components_per_style": st.column_config.NumberColumn("Components/Style", width="small"),
                         "garments_per_style": st.column_config.NumberColumn("Garments/Style", width="small"),
-                        "total_components_per_style": st.column_config.NumberColumn("Total Components (Style)", width="small")
+                        "actual_components_in_batch": st.column_config.NumberColumn("Total Components (Style)", width="small")
                     }
                 )
                 
@@ -938,7 +938,7 @@ if st.session_state.print_df is not None:
                 st.markdown("### 📊 Batch Summary")
                 batch_summary = batch_structure_df.groupby('batch_id').agg({
                     'style_number': 'nunique',
-                    'total_components_per_style': 'sum'
+                    'actual_components_in_batch': 'sum'
                 }).reset_index()
                 batch_summary.columns = ['batch_id', 'styles', 'total_components']
                 batch_summary = batch_summary.sort_values('batch_id')
