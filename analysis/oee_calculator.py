@@ -142,6 +142,32 @@ def calculate_batch_metrics(
             print_total_time = batch_print['total_time_sec'].sum() if 'total_time_sec' in batch_print.columns else 0
             print_uptime = batch_print['uptime_sec'].sum() if 'uptime_sec' in batch_print.columns else 0
             print_downtime = batch_print['downtime_sec'].sum() if 'downtime_sec' in batch_print.columns else 0
+
+            # Validate Print production time against batch time window
+            if 'job_start' in batch_print.columns and 'job_end' in batch_print.columns:
+                print_start_ts = batch_print['job_start'].min()
+                print_end_ts = batch_print['job_end'].max()
+                if print_start_ts and print_end_ts:
+                    if isinstance(print_start_ts, str):
+                        print_start_ts = pd.to_datetime(print_start_ts)
+                    if isinstance(print_end_ts, str):
+                        print_end_ts = pd.to_datetime(print_end_ts)
+
+                    expected_time_window_sec = (print_end_ts - print_start_ts).total_seconds()
+
+                    # For Print, total_time_sec should approximately equal batch time window
+                    # (Print doesn't use equipment states, so we validate JobReport totals)
+                    time_diff_sec = abs(print_total_time - expected_time_window_sec)
+                    time_diff_pct = (time_diff_sec / expected_time_window_sec * 100) if expected_time_window_sec > 0 else 0
+
+                    logger.info(f"Print Batch {batch_id}: Production time validation")
+                    logger.info(f"  Expected (calendar): {expected_time_window_sec:.1f}s ({expected_time_window_sec/3600:.2f}h)")
+                    logger.info(f"  Actual (JobReport): {print_total_time:.1f}s ({print_total_time/3600:.2f}h)")
+                    logger.info(f"  Difference: {time_diff_sec:.1f}s ({time_diff_pct:.1f}%)")
+                    logger.info(f"  Breakdown: uptime={print_uptime:.1f}s, downtime={print_downtime:.1f}s")
+
+                    if time_diff_pct > 5:  # More than 5% difference
+                        logger.warning(f"Print Batch {batch_id}: Production time mismatch > 5% - gaps between jobs or data issue")
             
             # Weighted availability: Σ(availability × total_time) / Σ(total_time)
             if 'availability' in batch_print.columns and 'total_time_sec' in batch_print.columns:
@@ -243,6 +269,13 @@ def calculate_batch_metrics(
             cut_end_ts = batch_cut['job_end'].max()
 
             if cut_start_ts and cut_end_ts:
+                # Calculate expected batch time window (calendar time)
+                if isinstance(cut_start_ts, str):
+                    cut_start_ts = pd.to_datetime(cut_start_ts)
+                if isinstance(cut_end_ts, str):
+                    cut_end_ts = pd.to_datetime(cut_end_ts)
+                expected_time_window_sec = (cut_end_ts - cut_start_ts).total_seconds()
+
                 # Query equipment states for operational insights
                 cut_equipment_states = fetch_robot_equipment_states('Cut1', cut_start_ts, cut_end_ts)
                 cut_operational_availability = cut_equipment_states.get('operational_availability', None)
@@ -250,6 +283,22 @@ def calculate_batch_metrics(
                 cut_running_time_sec = cut_equipment_states.get('running_time_sec', 0.0)
                 cut_equipment_downtime_sec = cut_equipment_states.get('downtime_sec', 0.0)
                 cut_idle_other_sec = cut_equipment_states.get('idle_other_sec', 0.0)
+
+                # Calculate operational production time (should equal batch time window)
+                cut_operational_time = cut_running_time_sec + cut_equipment_downtime_sec + cut_blocked_time_sec + cut_idle_other_sec
+
+                # Validate: operational production time should match batch time window
+                time_diff_sec = abs(cut_operational_time - expected_time_window_sec)
+                time_diff_pct = (time_diff_sec / expected_time_window_sec * 100) if expected_time_window_sec > 0 else 0
+
+                logger.info(f"Cut Batch {batch_id}: Operational time validation")
+                logger.info(f"  Expected (calendar): {expected_time_window_sec:.1f}s ({expected_time_window_sec/3600:.2f}h)")
+                logger.info(f"  Actual (states sum): {cut_operational_time:.1f}s ({cut_operational_time/3600:.2f}h)")
+                logger.info(f"  Difference: {time_diff_sec:.1f}s ({time_diff_pct:.1f}%)")
+                logger.info(f"  Breakdown: running={cut_running_time_sec:.1f}s, down={cut_equipment_downtime_sec:.1f}s, blocked={cut_blocked_time_sec:.1f}s, idle={cut_idle_other_sec:.1f}s")
+
+                if time_diff_pct > 5:  # More than 5% difference
+                    logger.warning(f"Cut Batch {batch_id}: Operational time mismatch > 5% - states may not cover full time window")
 
         # Pick metrics - use equipment state data for availability
         # Get batch time window from Pick JobReports (sheetStart_ts to sheetEnd_ts)
@@ -270,6 +319,9 @@ def calculate_batch_metrics(
             if isinstance(pick_end_ts, str):
                 pick_end_ts = pd.to_datetime(pick_end_ts)
 
+            # Calculate expected batch time window (calendar time)
+            expected_time_window_sec = (pick_end_ts - pick_start_ts).total_seconds()
+
             # Query equipment states for the batch time window
             equipment_states = fetch_robot_equipment_states('Pick1', pick_start_ts, pick_end_ts)
             running_time_sec = equipment_states['running_time_sec']
@@ -277,6 +329,22 @@ def calculate_batch_metrics(
             blocked_time_sec = equipment_states.get('blocked_time_sec', 0.0)
             starved_time_sec = equipment_states.get('starved_time_sec', 0.0)
             idle_other_sec = equipment_states.get('idle_other_sec', 0.0)
+
+            # Calculate operational production time (should equal batch time window)
+            pick_operational_time = running_time_sec + downtime_sec + starved_time_sec + idle_other_sec
+
+            # Validate: operational production time should match batch time window
+            time_diff_sec = abs(pick_operational_time - expected_time_window_sec)
+            time_diff_pct = (time_diff_sec / expected_time_window_sec * 100) if expected_time_window_sec > 0 else 0
+
+            logger.info(f"Pick Batch {batch_id}: Operational time validation")
+            logger.info(f"  Expected (calendar): {expected_time_window_sec:.1f}s ({expected_time_window_sec/3600:.2f}h)")
+            logger.info(f"  Actual (states sum): {pick_operational_time:.1f}s ({pick_operational_time/3600:.2f}h)")
+            logger.info(f"  Difference: {time_diff_sec:.1f}s ({time_diff_pct:.1f}%)")
+            logger.info(f"  Breakdown: running={running_time_sec:.1f}s, down={downtime_sec:.1f}s, starved={starved_time_sec:.1f}s, idle={idle_other_sec:.1f}s")
+
+            if time_diff_pct > 5:  # More than 5% difference
+                logger.warning(f"Pick Batch {batch_id}: Operational time mismatch > 5% - states may not cover full time window")
 
             # Calculate total time from equipment states (like Print/Cut use actual job runtime)
             # This ensures Pick's production time only includes running + down, not idle gaps
