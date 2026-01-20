@@ -1777,6 +1777,7 @@ def fetch_job_ids_for_batch(batch_ids: List[str]) -> List[str]:
                 FROM production_printjob
                 WHERE production_batch_id IN ({placeholders})
                 AND rg_id IS NOT NULL
+                AND status != 'cancelled'
                 ORDER BY rg_id
             """
 
@@ -1849,6 +1850,7 @@ def fetch_print_jobreports(job_ids: List[str]) -> pd.DataFrame:
                 FROM jobs
                 WHERE topic = %s
                 AND CAST(payload AS jsonb)->>'jobId' IN ({placeholders})
+                AND CAST(payload AS jsonb)->>'state' = 'completed'
                 ORDER BY ts ASC
             """
 
