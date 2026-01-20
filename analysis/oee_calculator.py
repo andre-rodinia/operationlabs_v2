@@ -257,6 +257,7 @@ def calculate_batch_metrics(
 
         # Cut operational metrics from equipment states (for constraint analysis)
         # Note: Cut OEE uses JobReport availability (above), this is supplementary
+        cut_equipment_availability_states = None  # Equipment availability from states (for UI display consistency)
         cut_operational_availability = None
         cut_blocked_time_sec = 0.0
         cut_running_time_sec = 0.0
@@ -278,6 +279,7 @@ def calculate_batch_metrics(
 
                 # Query equipment states for operational insights
                 cut_equipment_states = fetch_robot_equipment_states('Cut1', cut_start_ts, cut_end_ts)
+                cut_equipment_availability_states = cut_equipment_states.get('equipment_availability', None)
                 cut_operational_availability = cut_equipment_states.get('operational_availability', None)
                 cut_blocked_time_sec = cut_equipment_states.get('blocked_time_sec', 0.0)
                 cut_running_time_sec = cut_equipment_states.get('running_time_sec', 0.0)
@@ -397,7 +399,8 @@ def calculate_batch_metrics(
             # Cut metrics
             'cut_job_count': len(batch_cut),
             'cut_oee': cut_oee,
-            'cut_availability': cut_availability,  # From JobReports (primary metric)
+            'cut_availability': cut_availability,  # From JobReports (primary metric for OEE)
+            'cut_equipment_availability_states': cut_equipment_availability_states if cut_equipment_availability_states is not None else cut_availability,  # From equipment states (for UI consistency)
             'cut_operational_availability': cut_operational_availability if cut_operational_availability is not None else cut_availability,  # From equipment states (includes blocking)
             'cut_performance': cut_performance,
             'cut_quality': cut_quality,

@@ -614,7 +614,8 @@ if st.session_state.print_df is not None:
             cut_row = batch_metrics_df.iloc[0]
 
             # Get metrics
-            cut_equipment_avail = cut_row.get('cut_availability', 0)  # From JobReports
+            # Use equipment states for both metrics to ensure consistency with time breakdown
+            cut_equipment_avail = cut_row.get('cut_equipment_availability_states', cut_row.get('cut_availability', 0))  # From equipment states
             cut_operational_avail = cut_row.get('cut_operational_availability', 0)  # From equipment states
             cut_running_time = cut_row.get('cut_running_time_sec', 0) / 3600  # Convert to hours
             cut_downtime = cut_row.get('cut_equipment_downtime_sec', 0) / 3600
