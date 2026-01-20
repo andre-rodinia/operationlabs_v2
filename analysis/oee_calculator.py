@@ -220,27 +220,29 @@ def calculate_batch_metrics(
                         print_quality = ((total - defects) / total) * 100
         
         # Cut metrics
+        # INVESTIGATION: Store JobReports availability for comparison
+        cut_availability_jobreports = 0
+        cut_total_time_jobreports = 0
+
         if not batch_cut.empty:
-            cut_total_time = batch_cut['total_time_sec'].sum() if 'total_time_sec' in batch_cut.columns else 0
+            cut_total_time_jobreports = batch_cut['total_time_sec'].sum() if 'total_time_sec' in batch_cut.columns else 0
             cut_uptime = batch_cut['uptime_sec'].sum() if 'uptime_sec' in batch_cut.columns else 0
             cut_downtime = batch_cut['downtime_sec'].sum() if 'downtime_sec' in batch_cut.columns else 0
-            
-            # Weighted availability: Σ(availability × total_time) / Σ(total_time)
+
+            # Store JobReports availability for comparison (but don't use for OEE)
             if 'availability' in batch_cut.columns and 'total_time_sec' in batch_cut.columns:
-                cut_availability = weighted_avg(batch_cut, 'availability', 'total_time_sec')
+                cut_availability_jobreports = weighted_avg(batch_cut, 'availability', 'total_time_sec')
             else:
-                cut_availability = batch_cut['availability'].mean() if 'availability' in batch_cut.columns else 0
-            
+                cut_availability_jobreports = batch_cut['availability'].mean() if 'availability' in batch_cut.columns else 0
+
             # Weighted performance: Σ(performance × uptime) / Σ(uptime)
             if 'performance' in batch_cut.columns and 'uptime_sec' in batch_cut.columns and cut_uptime > 0:
                 cut_performance = weighted_avg(batch_cut, 'performance', 'uptime_sec')
             else:
                 cut_performance = batch_cut['performance'].mean() if 'performance' in batch_cut.columns else 0
         else:
-            cut_total_time = 0
             cut_uptime = 0
             cut_downtime = 0
-            cut_availability = 0
             cut_performance = 0
         
         # Quality from batch-level QC data (calculate from quality_breakdown)
@@ -255,9 +257,11 @@ def calculate_batch_metrics(
                     if total > 0:
                         cut_quality = ((total - defects) / total) * 100
 
-        # Cut operational metrics from equipment states (for constraint analysis)
-        # Note: Cut OEE uses JobReport availability (above), this is supplementary
-        cut_equipment_availability_states = None  # Equipment availability from states (for UI display consistency)
+        # INVESTIGATION: Cut now uses equipment states for availability (like Pick)
+        # This allows us to compare JobReports vs Equipment States approaches
+        cut_availability = 0  # Will be set from equipment states
+        cut_total_time = 0  # Will be calculated from equipment states
+        cut_equipment_availability_states = None  # Equipment availability from states (PRIMARY for OEE)
         cut_operational_availability = None
         cut_blocked_time_sec = 0.0
         cut_running_time_sec = 0.0
@@ -301,6 +305,40 @@ def calculate_batch_metrics(
 
                 if time_diff_pct > 5:  # More than 5% difference
                     logger.warning(f"Cut Batch {batch_id}: Operational time mismatch > 5% - states may not cover full time window")
+
+                # INVESTIGATION: Use equipment states for Cut availability (like Pick)
+                # Calculate total time from equipment states (running + down, excluding constraint time)
+                cut_total_time = cut_running_time_sec + cut_equipment_downtime_sec
+
+                # Use equipment availability for batch OEE (excludes constraint time)
+                cut_availability = cut_equipment_availability_states or 0
+
+                if cut_availability == 0 and cut_total_time > 0:
+                    # Fallback calculation if equipment_availability not present
+                    cut_availability = (cut_running_time_sec / cut_total_time) * 100
+                    logger.warning(f"Using fallback availability calculation for Cut batch {batch_id}")
+
+                # DIAGNOSTIC: Compare JobReports vs Equipment States availability
+                logger.info(f"Cut Batch {batch_id}: Availability Source Comparison")
+                logger.info(f"  JobReports Availability: {cut_availability_jobreports:.1f}%")
+                logger.info(f"    - Based on: SUM(uptime_sec)={cut_uptime:.1f}s / SUM(total_time_sec)={cut_total_time_jobreports:.1f}s")
+                logger.info(f"    - Time window coverage: {(cut_total_time_jobreports/expected_time_window_sec*100):.1f}% of calendar time")
+                logger.info(f"  Equipment States Availability (NOW USED FOR OEE): {cut_availability:.1f}%")
+                logger.info(f"    - Based on: running={cut_running_time_sec:.1f}s / (running + down)={cut_total_time:.1f}s")
+                logger.info(f"    - Time window coverage: 100% of calendar time (includes gaps)")
+                logger.info(f"  Difference: {abs(cut_availability_jobreports - cut_availability):.1f} percentage points")
+
+                # Calculate gap between jobs
+                gap_time_sec = expected_time_window_sec - cut_total_time_jobreports
+                gap_pct = (gap_time_sec / expected_time_window_sec * 100) if expected_time_window_sec > 0 else 0
+                if gap_time_sec > 0:
+                    logger.info(f"  Gap between jobs: {gap_time_sec:.1f}s ({gap_pct:.1f}% of calendar time)")
+                    logger.info(f"  → JobReports excludes this gap, Equipment States includes it")
+        else:
+            # Fallback to JobReports if time window not available
+            logger.warning(f"Could not get time window for Cut batch {batch_id}, using JobReports fallback")
+            cut_total_time = cut_total_time_jobreports
+            cut_availability = cut_availability_jobreports
 
         # Pick metrics - use equipment state data for availability
         # Get batch time window from Pick JobReports (sheetStart_ts to sheetEnd_ts)
@@ -410,12 +448,16 @@ def calculate_batch_metrics(
             # Cut metrics
             'cut_job_count': len(batch_cut),
             'cut_oee': cut_oee,
-            'cut_availability': cut_availability,  # From JobReports (primary metric for OEE)
-            'cut_equipment_availability_states': cut_equipment_availability_states if cut_equipment_availability_states is not None else cut_availability,  # From equipment states (for UI consistency)
+            'cut_availability': cut_availability,  # INVESTIGATION: Now from Equipment States (like Pick)
+            'cut_equipment_availability_states': cut_equipment_availability_states if cut_equipment_availability_states is not None else cut_availability,  # From equipment states
             'cut_operational_availability': cut_operational_availability if cut_operational_availability is not None else cut_availability,  # From equipment states (includes blocking)
             'cut_performance': cut_performance,
             'cut_quality': cut_quality,
             'cut_total_time_sec': cut_total_time,
+
+            # INVESTIGATION: Comparison metrics (JobReports vs Equipment States)
+            'cut_availability_jobreports': cut_availability_jobreports,  # For comparison
+            'cut_total_time_jobreports': cut_total_time_jobreports,  # For comparison
 
             # Cut constraint time breakdown (for analysis)
             'cut_running_time_sec': cut_running_time_sec,
