@@ -1826,9 +1826,41 @@ def fetch_print_jobreports(job_ids: List[str]) -> pd.DataFrame:
     - Missing JSON fields: Returns NULL for that field
     - Division by zero: Returns 0% for that metric
     - No records found: Returns empty DataFrame
+    - Jobs with failed state: Excluded entirely (even if they have completed records)
     """
     if not job_ids:
         return pd.DataFrame()
+
+    # Pre-filter: Exclude job_ids that have ANY failed state
+    try:
+        with get_historian_connection() as conn:
+            cursor = conn.cursor()
+
+            placeholders = ','.join(['%s'] * len(job_ids))
+            failed_check_query = f"""
+                SELECT DISTINCT CAST(payload AS jsonb)->>'jobId' as job_id
+                FROM jobs
+                WHERE topic = %s
+                AND CAST(payload AS jsonb)->>'jobId' IN ({placeholders})
+                AND CAST(payload AS jsonb)->>'state' = 'failed'
+            """
+
+            cursor.execute(failed_check_query, [Config.TOPICS['print']] + job_ids)
+            failed_jobs = cursor.fetchall()
+            cursor.close()
+
+            if failed_jobs:
+                failed_job_ids = set(row[0] for row in failed_jobs if row[0])
+                logger.warning(f"Excluding {len(failed_job_ids)} failed Print jobs: {failed_job_ids}")
+                # Filter out failed jobs
+                job_ids = [jid for jid in job_ids if jid not in failed_job_ids]
+
+                if not job_ids:
+                    logger.warning("All Print jobs were failed, returning empty DataFrame")
+                    return pd.DataFrame()
+    except Exception as e:
+        logger.error(f"Error checking for failed Print jobs: {e}", exc_info=True)
+        # Continue with original job_ids if check fails
 
     try:
         with get_historian_connection() as conn:
@@ -1941,9 +1973,47 @@ def fetch_cut_jobreports(job_ids: List[str], print_df: pd.DataFrame = None, time
     - Multiple Cut reports per job_id: Filters by time window, then takes latest by timestamp
     - Missing Print data: batch_id/sheet_index will be NULL
     - Job IDs reused across days: Time window filter ensures we get the correct day's report
+    - Jobs with failed state: Excluded entirely (even if they have completed records)
     """
     if not job_ids:
         return pd.DataFrame()
+
+    # Pre-filter: Exclude job_ids that have ANY failed state
+    try:
+        with get_historian_connection() as conn:
+            cursor = conn.cursor()
+
+            placeholders = ','.join(['%s'] * len(job_ids))
+            failed_check_query = f"""
+                SELECT DISTINCT COALESCE(
+                    CAST(payload AS jsonb)->>'jobId',
+                    CAST(payload AS jsonb)->'data'->'ids'->>'jobId'
+                ) as job_id
+                FROM jobs
+                WHERE topic = %s
+                AND (
+                    CAST(payload AS jsonb)->>'jobId' IN ({placeholders})
+                    OR CAST(payload AS jsonb)->'data'->'ids'->>'jobId' IN ({placeholders})
+                )
+                AND CAST(payload AS jsonb)->>'state' = 'failed'
+            """
+
+            cursor.execute(failed_check_query, [Config.TOPICS['cut']] + list(job_ids) + list(job_ids))
+            failed_jobs = cursor.fetchall()
+            cursor.close()
+
+            if failed_jobs:
+                failed_job_ids = set(row[0] for row in failed_jobs if row[0])
+                logger.warning(f"Excluding {len(failed_job_ids)} failed Cut jobs: {failed_job_ids}")
+                # Filter out failed jobs
+                job_ids = [jid for jid in job_ids if jid not in failed_job_ids]
+
+                if not job_ids:
+                    logger.warning("All Cut jobs were failed, returning empty DataFrame")
+                    return pd.DataFrame()
+    except Exception as e:
+        logger.error(f"Error checking for failed Cut jobs: {e}", exc_info=True)
+        # Continue with original job_ids if check fails
 
     try:
         with get_historian_connection() as conn:
