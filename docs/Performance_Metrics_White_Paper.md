@@ -283,17 +283,17 @@ Production Time = uptime_sec + downtime_sec
 Pick uses equipment state tracking, requiring special handling:
 
 ```sql
--- Query equipment states for batch time window
+-- Query equipment states for batch time window with description
 WITH relevant_states AS (
     -- Get last state before window + all states in window
     SELECT * FROM (
-        SELECT ts, cell, state
+        SELECT ts, cell, state, description
         FROM equipment
         WHERE cell = 'Pick1' AND ts <= batch_start
         ORDER BY ts DESC LIMIT 1
     ) AS before_window
     UNION ALL
-    SELECT ts, cell, state
+    SELECT ts, cell, state, description
     FROM equipment
     WHERE cell = 'Pick1'
       AND ts > batch_start
@@ -303,11 +303,13 @@ state_changes AS (
     SELECT
         ts,
         state,
+        description,
         LEAD(ts) OVER (ORDER BY ts ASC) AS next_ts
     FROM relevant_states
 )
 SELECT
     state,
+    description,
     SUM(EXTRACT(EPOCH FROM (
         LEAST(COALESCE(next_ts, batch_end), batch_end) -
         GREATEST(ts, batch_start)
@@ -315,14 +317,14 @@ SELECT
 FROM state_changes
 WHERE ts < batch_end
   AND (next_ts IS NULL OR next_ts > batch_start)
-GROUP BY state;
+GROUP BY state, description;
 ```
 
-**State Classification:**
+**State Classification (see Section 4.3 for full algorithm):**
 - `running`: Robot actively picking → counts as running time
 - `down`: Robot failure/unavailable → counts as downtime
-- `idle`: Robot available but not producing → **excluded from production time**
-- `blocked`: Downstream blockage → **excluded from production time**
+- `idle` → classified as `starved` (waiting for Cut) → **excluded from equipment production time**
+- `blocked` → classified as `starved` (waiting for Cut) → **excluded from equipment production time**
 
 ```
 Pick Production Time = running_time_sec + downtime_sec
@@ -344,7 +346,160 @@ Availability = running_time_sec / (running_time_sec + downtime_sec) × 100%
 
 **Key Assumption:** Idle time is NOT counted as downtime. The equipment is available but not scheduled for production during idle periods.
 
-### 4.3 Performance Calculation
+### 4.3 Constraint Time and Dual Availability Metrics
+
+**Problem Statement:**
+
+In a coupled production system (Cut → Pick), equipment can be idle due to two distinct reasons:
+1. **Scheduled Idle**: No work available (between batches)
+2. **Constraint Idle**: Blocked/starved by adjacent equipment (system constraint)
+
+Treating both types of idle equally distorts availability metrics. We need to distinguish between equipment health (is the equipment reliable?) and system effectiveness (is the system configured optimally?).
+
+**Solution: Dual Availability Metrics**
+
+#### Equipment States Classification
+
+Equipment states are classified by root cause using the `description` field:
+
+**Cut Cell States:**
+- `running`: Cut actively cutting
+- `down`: Cut machine failure (equipment's fault)
+- `blocked`: Cut idle waiting for Pick robot (system constraint)
+  - Detected via description: "Waiting for the robot", "No JB heartbeat"
+- `idle_other`: Cut idle between batches (scheduled idle)
+
+**Pick Cell States:**
+- `running`: Robot actively picking
+- `down`: Robot malfunction/failure (equipment's fault)
+- `starved`: Robot idle (assumed waiting for Cut to deliver)
+  - Assumption: All Pick idle is upstream starvation (robot is faster than Cut)
+- `idle_other`: None (all idle classified as starved)
+
+#### State Classification Algorithm
+
+```python
+def classify_equipment_state(cell: str, state: str, description: str = None) -> str:
+    """
+    Classify equipment state into operational categories.
+
+    Returns: 'running' | 'down' | 'blocked' | 'starved' | 'idle_other'
+    """
+    if state == 'running':
+        return 'running'
+
+    if state == 'down':
+        return 'down'
+
+    # Cut-specific: Parse description for blocking
+    if 'Cut' in cell:
+        if state == 'idle' and description:
+            if any(keyword in description.lower() for keyword in [
+                'waiting for the robot', 'waiting for robot',
+                'no jb heartbeat', 'robot', 'downstream'
+            ]):
+                return 'blocked'
+        if state == 'blocked':
+            return 'blocked'
+        if state == 'idle':
+            return 'idle_other'
+
+    # Pick-specific: Assume all idle is upstream starvation
+    if 'Pick' in cell:
+        if state in ['idle', 'blocked']:
+            return 'starved'
+
+    return 'idle_other'
+```
+
+#### Dual Availability Calculation
+
+**Equipment Availability (Equipment Health):**
+```
+Equipment Availability = running / (running + down) × 100%
+```
+- Excludes: blocked, starved, idle_other
+- Measures: How reliable is this equipment when it CAN run?
+- Use case: Maintenance planning, equipment comparison
+
+**Operational Availability (System Throughput):**
+```
+Operational Availability = running / (running + down + blocked + starved) × 100%
+```
+- Includes: Constraint time (blocked/starved)
+- Measures: How much of scheduled time is equipment actually producing?
+- Use case: Capacity planning, bottleneck identification
+
+**Production Time Calculation:**
+```
+Equipment Production Time = running + down
+Operational Production Time = running + down + blocked + starved
+```
+
+#### Usage in OEE Calculations
+
+**Batch-Level OEE (Equipment-Focused):**
+```
+Batch OEE = Equipment Availability × Performance × Quality
+```
+- Uses equipment availability (excludes constraints)
+- Measures: How well did equipment perform when it could run?
+- Comparable across cells regardless of system constraints
+
+**Operational OEE (System-Focused):**
+```
+Operational OEE = Operational Availability × Performance × Quality
+```
+- Uses operational availability (includes constraints)
+- Measures: How well did equipment perform overall?
+- Identifies system bottlenecks and configuration issues
+
+**Current Implementation:**
+- **Primary metric**: Equipment Availability for batch OEE
+- **Secondary metric**: Operational Availability stored for analysis
+- **Constraint breakdown**: blocked_time_sec, starved_time_sec tracked separately
+
+#### Example: Cut Cell Analysis
+
+```
+Batch 950:
+├─ Running: 9,500s (75.2%)
+├─ Down: 500s (4.0%)
+├─ Blocked: 2,000s (15.8%) ← Waiting for Pick robot
+├─ Idle Other: 634s (5.0%)
+└─ Total: 12,634s
+
+Equipment Availability: 9,500 / (9,500 + 500) = 95.0%
+  → "Cut is 95% reliable when it can run"
+
+Operational Availability: 9,500 / (9,500 + 500 + 2,000) = 79.2%
+  → "Cut is only producing 79% of the time due to Pick blocking"
+
+Constraint Analysis: 15.8% of time blocked by downstream
+  → Consider faster Pick robot or larger buffer
+```
+
+#### Example: Pick Cell Analysis
+
+```
+Batch 950:
+├─ Running: 9,381s (65.3%)
+├─ Down: 1,162s (8.1%)
+├─ Starved: 3,500s (24.4%) ← Waiting for Cut
+├─ Idle Other: 323s (2.2%)
+└─ Total: 14,366s
+
+Equipment Availability: 9,381 / (9,381 + 1,162) = 88.97%
+  → "Pick robot is 89% reliable when it can run"
+
+Operational Availability: 9,381 / (9,381 + 1,162 + 3,500) = 66.8%
+  → "Pick is only producing 67% of time due to Cut starvation"
+
+Constraint Analysis: 24.4% of time starved by upstream
+  → Consider faster Cut or larger buffer
+```
+
+### 4.4 Performance Calculation
 
 **Print (Job-Level):**
 ```
