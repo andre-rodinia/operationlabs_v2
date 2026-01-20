@@ -639,6 +639,12 @@ if st.session_state.print_df is not None:
 
             # Time breakdown
             st.markdown("**Time Breakdown:**")
+
+            # Calculate totals
+            equipment_production_time = cut_running_time + cut_downtime
+            operational_production_time = equipment_production_time + cut_blocked
+            total_time = operational_production_time + cut_idle_other
+
             breakdown_data = pd.DataFrame([
                 {"State": "Running", "Hours": cut_running_time, "Type": "Productive"},
                 {"State": "Equipment Down", "Hours": cut_downtime, "Type": "Equipment Issue"},
@@ -652,11 +658,18 @@ if st.session_state.print_df is not None:
                 hide_index=True
             )
 
+            # Summary metrics
+            st.markdown(f"""
+            **Summary:**
+            - Equipment Production Time: {equipment_production_time:.2f}h (Running + Down)
+            - Operational Production Time: {operational_production_time:.2f}h (+ Blocked)
+            - Total Time Window: {total_time:.2f}h
+            """)
+
             # Constraint impact
-            total_time = cut_running_time + cut_downtime + cut_blocked + cut_idle_other
-            if total_time > 0:
-                constraint_pct = (cut_blocked / total_time) * 100
-                st.info(f"💡 **Constraint Impact**: {constraint_pct:.1f}% of total time spent blocked by Pick robot")
+            if operational_production_time > 0:
+                constraint_pct = (cut_blocked / operational_production_time) * 100
+                st.info(f"💡 **Constraint Impact**: {constraint_pct:.1f}% of production time spent blocked by Pick robot")
         else:
             st.info("No constraint data available for Cut")
 
@@ -692,6 +705,12 @@ if st.session_state.print_df is not None:
 
             # Time breakdown
             st.markdown("**Time Breakdown:**")
+
+            # Calculate totals
+            equipment_production_time = pick_running_time + pick_downtime
+            operational_production_time = equipment_production_time + pick_starved
+            total_time = operational_production_time + pick_idle_other
+
             breakdown_data = pd.DataFrame([
                 {"State": "Running", "Hours": pick_running_time, "Type": "Productive"},
                 {"State": "Equipment Down", "Hours": pick_downtime, "Type": "Equipment Issue"},
@@ -705,11 +724,18 @@ if st.session_state.print_df is not None:
                 hide_index=True
             )
 
+            # Summary metrics
+            st.markdown(f"""
+            **Summary:**
+            - Equipment Production Time: {equipment_production_time:.2f}h (Running + Down)
+            - Operational Production Time: {operational_production_time:.2f}h (+ Starved)
+            - Total Time Window: {total_time:.2f}h
+            """)
+
             # Constraint impact
-            total_time = pick_running_time + pick_downtime + pick_starved + pick_idle_other
-            if total_time > 0:
-                constraint_pct = (pick_starved / total_time) * 100
-                st.info(f"💡 **Constraint Impact**: {constraint_pct:.1f}% of total time spent starved (waiting for Cut)")
+            if operational_production_time > 0:
+                constraint_pct = (pick_starved / operational_production_time) * 100
+                st.info(f"💡 **Constraint Impact**: {constraint_pct:.1f}% of production time spent starved (waiting for Cut)")
         else:
             st.info("No constraint data available for Pick")
 
