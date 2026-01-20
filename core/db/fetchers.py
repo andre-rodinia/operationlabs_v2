@@ -1171,6 +1171,68 @@ def get_batch_pick_time_window(pick_df: pd.DataFrame, batch_id: str) -> Tuple[Op
     return batch_start, batch_end
 
 
+def classify_equipment_state(cell: str, state: str, description: str = None) -> str:
+    """
+    Classify equipment state into operational categories.
+
+    Categories:
+    - running: Equipment actively producing
+    - down: Equipment failure/maintenance (equipment's fault)
+    - blocked: Downstream blocking (Cut waiting for Pick)
+    - starved: Upstream starvation (Pick waiting for Cut)
+    - idle_other: Scheduled idle (between batches, no work)
+
+    Args:
+        cell: Equipment cell name (e.g., 'Cut1', 'Pick1')
+        state: Raw state from equipment table
+        description: Optional description field with root cause
+
+    Returns:
+        Classified state category
+    """
+    # Running state is universal
+    if state == 'running':
+        return 'running'
+
+    # Down state is universal (equipment failure)
+    if state == 'down':
+        return 'down'
+
+    # Cut-specific: Parse description for blocking
+    if 'Cut' in cell:
+        if state == 'idle' and description:
+            # Check for robot-related blocking
+            desc_lower = description.lower()
+            if any(keyword in desc_lower for keyword in [
+                'waiting for the robot',
+                'waiting for robot',
+                'no jb heartbeat',
+                'robot',
+                'downstream'
+            ]):
+                return 'blocked'  # Blocked by Pick
+
+        # Explicit blocked state
+        if state == 'blocked':
+            return 'blocked'
+
+        # If idle but no robot-related description, it's scheduled idle
+        if state == 'idle':
+            return 'idle_other'
+
+    # Pick-specific: Assume all idle is upstream starvation
+    if 'Pick' in cell:
+        if state == 'idle':
+            return 'starved'  # Waiting for Cut to deliver components
+
+        # Explicit blocked state (waiting for upstream)
+        if state == 'blocked':
+            return 'starved'
+
+    # Fallback for any other states
+    return 'idle_other'
+
+
 def fetch_robot_equipment_states(
     cell: str,
     start_ts: str,
@@ -1178,20 +1240,33 @@ def fetch_robot_equipment_states(
 ) -> Dict[str, float]:
     """
     Query equipment state changes for robot cell within time window.
-    
-    Calculates total running time and downtime from equipment state transitions.
-    
+
+    Calculates total running time, downtime, and constraint time from equipment
+    state transitions with description parsing for root cause analysis.
+
+    Returns dual availability metrics:
+    - Equipment Availability: Excludes constraint time (blocked/starved)
+    - Operational Availability: Includes constraint time
+
     Args:
-        cell: Cell name (e.g., 'Pick1')
+        cell: Cell name (e.g., 'Pick1', 'Cut1')
         start_ts: Start timestamp (ISO format string)
         end_ts: End timestamp (ISO format string)
-        
+
     Returns:
-        Dictionary with 'running_time_sec' and 'downtime_sec'
+        Dictionary with time breakdowns and availability metrics
     """
     if not start_ts or not end_ts:
         logger.warning(f"Missing start or end timestamp for {cell}")
-        return {'running_time_sec': 0.0, 'downtime_sec': 0.0}
+        return {
+            'running_time_sec': 0.0,
+            'downtime_sec': 0.0,
+            'blocked_time_sec': 0.0,
+            'starved_time_sec': 0.0,
+            'idle_other_sec': 0.0,
+            'equipment_availability': 0.0,
+            'operational_availability': 0.0
+        }
     
     try:
         with get_historian_connection() as conn:
@@ -1201,14 +1276,14 @@ def fetch_robot_equipment_states(
                 WITH relevant_states AS (
                     -- Get the last state before window start + all states in window
                     SELECT * FROM (
-                        SELECT ts, cell, state
+                        SELECT ts, cell, state, description
                         FROM equipment
                         WHERE cell = %s AND ts <= %s::timestamptz
                         ORDER BY ts DESC
                         LIMIT 1
                     ) AS before_window
                     UNION ALL
-                    SELECT ts, cell, state
+                    SELECT ts, cell, state, description
                     FROM equipment
                     WHERE cell = %s AND ts > %s::timestamptz AND ts < %s::timestamptz
                 ),
@@ -1216,12 +1291,14 @@ def fetch_robot_equipment_states(
                     SELECT
                         ts,
                         state,
+                        description,
                         LEAD(ts) OVER (ORDER BY ts ASC) AS next_ts
                     FROM relevant_states
                     ORDER BY ts ASC
                 )
                 SELECT
                     state,
+                    description,
                     SUM(EXTRACT(EPOCH FROM (
                         LEAST(COALESCE(next_ts, %s::timestamptz), %s::timestamptz) -
                         GREATEST(ts, %s::timestamptz)
@@ -1229,36 +1306,89 @@ def fetch_robot_equipment_states(
                 FROM state_changes
                 WHERE ts < %s::timestamptz
                   AND (next_ts IS NULL OR next_ts > %s::timestamptz)
-                GROUP BY state;
+                GROUP BY state, description;
             """
 
             cursor.execute(query, [cell, start_ts, cell, start_ts, end_ts, end_ts, end_ts, start_ts, end_ts, start_ts])
             results = cursor.fetchall()
             cursor.close()
 
+            # Initialize time buckets
             running_time_sec = 0.0
             downtime_sec = 0.0
+            blocked_time_sec = 0.0  # Cut waiting for Pick
+            starved_time_sec = 0.0  # Pick waiting for Cut
+            idle_other_sec = 0.0    # Scheduled idle (between batches)
+
             all_states = {}
 
-            for state, duration in results:
+            for state, description, duration in results:
                 duration_float = float(duration) if duration else 0.0
-                all_states[state] = duration_float
 
-                if state == 'running':
+                # Classify the state using helper function
+                classified = classify_equipment_state(cell, state, description)
+
+                # Track all states for debugging
+                state_key = f"{state}_{classified}"
+                all_states[state_key] = all_states.get(state_key, 0) + duration_float
+
+                # Accumulate into time buckets
+                if classified == 'running':
                     running_time_sec += duration_float
-                elif state == 'down':
-                    # Only 'down' state counts as downtime (machine failure/unavailable)
-                    # Idle, blocked, etc. are NOT counted (machine is available but not producing)
+                elif classified == 'down':
                     downtime_sec += duration_float
+                elif classified == 'blocked':
+                    blocked_time_sec += duration_float
+                elif classified == 'starved':
+                    starved_time_sec += duration_float
+                else:  # idle_other
+                    idle_other_sec += duration_float
+
+            # Calculate Equipment Availability (equipment health - excludes constraints)
+            # Answers: "When this equipment CAN run, is it running or broken?"
+            equipment_production_time = running_time_sec + downtime_sec
+            equipment_availability = (running_time_sec / equipment_production_time * 100) if equipment_production_time > 0 else 0
+
+            # Calculate Operational Availability (includes constraints)
+            # Answers: "How much of the time is this equipment actually producing?"
+            operational_production_time = running_time_sec + downtime_sec + blocked_time_sec + starved_time_sec
+            operational_availability = (running_time_sec / operational_production_time * 100) if operational_production_time > 0 else 0
+
+            logger.info(f"{cell} equipment states: running={running_time_sec:.1f}s, down={downtime_sec:.1f}s, "
+                       f"blocked={blocked_time_sec:.1f}s, starved={starved_time_sec:.1f}s, idle_other={idle_other_sec:.1f}s")
+            logger.info(f"{cell} availability: equipment={equipment_availability:.1f}%, operational={operational_availability:.1f}%")
 
             return {
+                # Time components
                 'running_time_sec': running_time_sec,
-                'downtime_sec': downtime_sec
+                'downtime_sec': downtime_sec,
+                'blocked_time_sec': blocked_time_sec,
+                'starved_time_sec': starved_time_sec,
+                'idle_other_sec': idle_other_sec,
+
+                # Equipment availability (health metric - excludes constraints)
+                'equipment_availability': equipment_availability,
+                'equipment_production_time_sec': equipment_production_time,
+
+                # Operational availability (includes constraints)
+                'operational_availability': operational_availability,
+                'operational_production_time_sec': operational_production_time,
+
+                # Legacy/state tracking
+                'all_states': all_states
             }
             
     except Exception as e:
         logger.error(f"Error querying equipment states for {cell}: {e}", exc_info=True)
-        return {'running_time_sec': 0.0, 'downtime_sec': 0.0}
+        return {
+            'running_time_sec': 0.0,
+            'downtime_sec': 0.0,
+            'blocked_time_sec': 0.0,
+            'starved_time_sec': 0.0,
+            'idle_other_sec': 0.0,
+            'equipment_availability': 0.0,
+            'operational_availability': 0.0
+        }
 
 
 def validate_job_count_consistency(
