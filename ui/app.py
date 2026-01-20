@@ -579,7 +579,142 @@ if st.session_state.print_df is not None:
     )
 
     # ========================================================================
-    # 4.2: DAILY-LEVEL METRICS
+    # 4.2: CONSTRAINT ANALYSIS (Dual Availability Metrics)
+    # ========================================================================
+
+    st.subheader("⚙️ Constraint Analysis")
+    st.caption("Distinguishing equipment health from system constraints")
+
+    with st.expander("ℹ️ Understanding Dual Availability Metrics"):
+        st.markdown("""
+        **Equipment Availability** (Equipment Health):
+        - Measures: How well the equipment itself is functioning
+        - Formula: Running Time / (Running Time + Equipment Downtime) × 100%
+        - Excludes: Constraint time (blocked/starved by adjacent cells)
+        - Use Case: Maintenance planning, equipment reliability assessment
+
+        **Operational Availability** (System Effectiveness):
+        - Measures: How well the equipment contributes to the overall system
+        - Formula: Running Time / (Running Time + Downtime + Constraint Time) × 100%
+        - Includes: All idle time including system constraints
+        - Use Case: System optimization, bottleneck identification
+
+        **Constraint Types**:
+        - **Blocked**: Cut waiting for Pick robot (downstream constraint)
+        - **Starved**: Pick waiting for Cut to deliver components (upstream constraint)
+        """)
+
+    # Display constraint analysis for Cut and Pick
+    constraint_cols = st.columns(2)
+
+    with constraint_cols[0]:
+        st.markdown("### ✂️ Cut Cell")
+
+        if not batch_metrics_df.empty and 'cut_operational_availability' in batch_metrics_df.columns:
+            cut_row = batch_metrics_df.iloc[0]
+
+            # Get metrics
+            cut_equipment_avail = cut_row.get('cut_availability', 0)  # From JobReports
+            cut_operational_avail = cut_row.get('cut_operational_availability', 0)  # From equipment states
+            cut_running_time = cut_row.get('cut_running_time_sec', 0) / 3600  # Convert to hours
+            cut_downtime = cut_row.get('cut_equipment_downtime_sec', 0) / 3600
+            cut_blocked = cut_row.get('cut_blocked_time_sec', 0) / 3600
+            cut_idle_other = cut_row.get('cut_idle_other_sec', 0) / 3600
+
+            # Display metrics
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric(
+                    "Equipment Availability",
+                    f"{cut_equipment_avail:.1f}%",
+                    help="Equipment health (excludes constraint time)"
+                )
+            with col2:
+                st.metric(
+                    "Operational Availability",
+                    f"{cut_operational_avail:.1f}%",
+                    help="System effectiveness (includes constraint time)",
+                    delta=f"{cut_operational_avail - cut_equipment_avail:.1f}%"
+                )
+
+            # Time breakdown
+            st.markdown("**Time Breakdown:**")
+            breakdown_data = pd.DataFrame([
+                {"State": "Running", "Hours": cut_running_time, "Type": "Productive"},
+                {"State": "Equipment Down", "Hours": cut_downtime, "Type": "Equipment Issue"},
+                {"State": "Blocked (waiting for Pick)", "Hours": cut_blocked, "Type": "System Constraint"},
+                {"State": "Scheduled Idle", "Hours": cut_idle_other, "Type": "Other"}
+            ])
+
+            st.dataframe(
+                breakdown_data.style.format({"Hours": "{:.2f}h"}),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            # Constraint impact
+            total_time = cut_running_time + cut_downtime + cut_blocked + cut_idle_other
+            if total_time > 0:
+                constraint_pct = (cut_blocked / total_time) * 100
+                st.info(f"💡 **Constraint Impact**: {constraint_pct:.1f}% of total time spent blocked by Pick robot")
+        else:
+            st.info("No constraint data available for Cut")
+
+    with constraint_cols[1]:
+        st.markdown("### 🤖 Pick Cell")
+
+        if not batch_metrics_df.empty and 'pick_operational_availability' in batch_metrics_df.columns:
+            pick_row = batch_metrics_df.iloc[0]
+
+            # Get metrics
+            pick_equipment_avail = pick_row.get('pick_availability', 0)  # Equipment availability
+            pick_operational_avail = pick_row.get('pick_operational_availability', 0)
+            pick_running_time = pick_row.get('pick_running_time_sec', 0) / 3600
+            pick_downtime = pick_row.get('pick_downtime_sec', 0) / 3600
+            pick_starved = pick_row.get('pick_starved_time_sec', 0) / 3600
+            pick_idle_other = pick_row.get('pick_idle_other_sec', 0) / 3600
+
+            # Display metrics
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric(
+                    "Equipment Availability",
+                    f"{pick_equipment_avail:.1f}%",
+                    help="Equipment health (excludes constraint time)"
+                )
+            with col2:
+                st.metric(
+                    "Operational Availability",
+                    f"{pick_operational_avail:.1f}%",
+                    help="System effectiveness (includes constraint time)",
+                    delta=f"{pick_operational_avail - pick_equipment_avail:.1f}%"
+                )
+
+            # Time breakdown
+            st.markdown("**Time Breakdown:**")
+            breakdown_data = pd.DataFrame([
+                {"State": "Running", "Hours": pick_running_time, "Type": "Productive"},
+                {"State": "Equipment Down", "Hours": pick_downtime, "Type": "Equipment Issue"},
+                {"State": "Starved (waiting for Cut)", "Hours": pick_starved, "Type": "System Constraint"},
+                {"State": "Scheduled Idle", "Hours": pick_idle_other, "Type": "Other"}
+            ])
+
+            st.dataframe(
+                breakdown_data.style.format({"Hours": "{:.2f}h"}),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            # Constraint impact
+            total_time = pick_running_time + pick_downtime + pick_starved + pick_idle_other
+            if total_time > 0:
+                constraint_pct = (pick_starved / total_time) * 100
+                st.info(f"💡 **Constraint Impact**: {constraint_pct:.1f}% of total time spent starved (waiting for Cut)")
+        else:
+            st.info("No constraint data available for Pick")
+
+    # ========================================================================
+    # 4.3: DAILY-LEVEL METRICS
     # ========================================================================
 
     st.subheader("📅 Daily-Level OEE Metrics (Break-Aware)")
@@ -654,7 +789,7 @@ if st.session_state.print_df is not None:
     )
 
     # ========================================================================
-    # 4.3: JOB-LEVEL DETAILS
+    # 4.4: JOB-LEVEL DETAILS
     # ========================================================================
 
     with st.expander("🔍 View Job-Level Details"):
@@ -957,7 +1092,7 @@ if st.session_state.print_df is not None:
                 st.info("No batch structure data available")
 
     # ========================================================================
-    # 4.4: EXPORT
+    # 4.5: EXPORT
     # ========================================================================
 
     st.subheader("💾 Export Data")
@@ -985,7 +1120,7 @@ if st.session_state.print_df is not None:
         )
 
     # ========================================================================
-    # 4.5: EQUIPMENT STATE ANALYSIS
+    # 4.6: EQUIPMENT STATE ANALYSIS
     # ========================================================================
     
     if 'cell_timestamps' in st.session_state and st.session_state.cell_timestamps:
@@ -1128,7 +1263,7 @@ if st.session_state.print_df is not None:
             st.warning("No equipment state data available for selected batches")
     
     # ========================================================================
-    # 4.6: THROUGHPUT ANALYSIS
+    # 4.7: THROUGHPUT ANALYSIS
     # ========================================================================
     
     if ('equipment_state_data' in st.session_state and 
