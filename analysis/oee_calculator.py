@@ -228,7 +228,7 @@ def calculate_batch_metrics(
                     defects = batch_qc['cut_defects'].iloc[0]
                     if total > 0:
                         cut_quality = ((total - defects) / total) * 100
-        
+
         # Pick metrics - use equipment state data for availability
         # Get batch time window from Pick JobReports (sheetStart_ts to sheetEnd_ts)
         # Use the already-filtered batch_pick if available (it's already filtered by normalized batch_id)
@@ -252,20 +252,25 @@ def calculate_batch_metrics(
             equipment_states = fetch_robot_equipment_states('Pick1', pick_start_ts, pick_end_ts)
             running_time_sec = equipment_states['running_time_sec']
             downtime_sec = equipment_states['downtime_sec']
+            blocked_time_sec = equipment_states.get('blocked_time_sec', 0.0)
+            starved_time_sec = equipment_states.get('starved_time_sec', 0.0)
+            idle_other_sec = equipment_states.get('idle_other_sec', 0.0)
 
             # Calculate total time from equipment states (like Print/Cut use actual job runtime)
             # This ensures Pick's production time only includes running + down, not idle gaps
             pick_total_time = running_time_sec + downtime_sec
 
-            # Calculate availability using equipment states only (for batch OEE)
-            # This keeps batch OEE calculation consistent with the original method
-            total_time_for_availability = running_time_sec + downtime_sec
-            if total_time_for_availability > 0:
-                pick_availability = (running_time_sec / total_time_for_availability) * 100
-                logger.info(f"Pick batch {batch_id}: running={running_time_sec:.1f}s, downtime={downtime_sec:.1f}s, total={total_time_for_availability:.1f}s, availability={pick_availability:.2f}%")
-            else:
-                pick_availability = 0
-                logger.warning(f"Total time for availability is 0 for batch {batch_id}")
+            # Use equipment availability for batch OEE (excludes constraint time)
+            # This measures equipment health, not system constraints
+            pick_availability = equipment_states.get('equipment_availability', 0.0)
+
+            # Store operational availability for analysis (includes constraint time)
+            pick_operational_availability = equipment_states.get('operational_availability', 0.0)
+
+            if pick_availability == 0 and pick_total_time > 0:
+                # Fallback calculation if equipment_availability not present
+                pick_availability = (running_time_sec / pick_total_time) * 100
+                logger.warning(f"Using fallback availability calculation for batch {batch_id}")
         else:
             # Fallback to job-level data if time window not available
             logger.warning(f"Could not get time window for batch {batch_id}, using job-level data fallback")
@@ -310,10 +315,18 @@ def calculate_batch_metrics(
             # Pick metrics
             'pick_job_count': len(batch_pick),
             'pick_oee': pick_oee,
-            'pick_availability': pick_availability,
+            'pick_availability': pick_availability,  # Equipment availability (health metric)
+            'pick_operational_availability': pick_operational_availability if 'pick_operational_availability' in locals() else pick_availability,  # Operational availability (includes constraints)
             'pick_performance': pick_performance,
             'pick_quality': pick_quality,
             'pick_total_time_sec': pick_total_time,
+
+            # Pick constraint time breakdown (for analysis)
+            'pick_running_time_sec': running_time_sec if 'running_time_sec' in locals() else 0,
+            'pick_downtime_sec': downtime_sec if 'downtime_sec' in locals() else 0,
+            'pick_blocked_time_sec': blocked_time_sec if 'blocked_time_sec' in locals() else 0,
+            'pick_starved_time_sec': starved_time_sec if 'starved_time_sec' in locals() else 0,
+            'pick_idle_other_sec': idle_other_sec if 'idle_other_sec' in locals() else 0,
         }
 
         batch_metrics.append(metrics)
