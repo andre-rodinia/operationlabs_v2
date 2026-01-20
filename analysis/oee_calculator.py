@@ -229,6 +229,28 @@ def calculate_batch_metrics(
                     if total > 0:
                         cut_quality = ((total - defects) / total) * 100
 
+        # Cut operational metrics from equipment states (for constraint analysis)
+        # Note: Cut OEE uses JobReport availability (above), this is supplementary
+        cut_operational_availability = None
+        cut_blocked_time_sec = 0.0
+        cut_running_time_sec = 0.0
+        cut_equipment_downtime_sec = 0.0
+        cut_idle_other_sec = 0.0
+
+        if not batch_cut.empty and 'job_start' in batch_cut.columns and 'job_end' in batch_cut.columns:
+            # Get Cut batch time window
+            cut_start_ts = batch_cut['job_start'].min()
+            cut_end_ts = batch_cut['job_end'].max()
+
+            if cut_start_ts and cut_end_ts:
+                # Query equipment states for operational insights
+                cut_equipment_states = fetch_robot_equipment_states('Cut1', cut_start_ts, cut_end_ts)
+                cut_operational_availability = cut_equipment_states.get('operational_availability', None)
+                cut_blocked_time_sec = cut_equipment_states.get('blocked_time_sec', 0.0)
+                cut_running_time_sec = cut_equipment_states.get('running_time_sec', 0.0)
+                cut_equipment_downtime_sec = cut_equipment_states.get('downtime_sec', 0.0)
+                cut_idle_other_sec = cut_equipment_states.get('idle_other_sec', 0.0)
+
         # Pick metrics - use equipment state data for availability
         # Get batch time window from Pick JobReports (sheetStart_ts to sheetEnd_ts)
         # Use the already-filtered batch_pick if available (it's already filtered by normalized batch_id)
@@ -307,10 +329,17 @@ def calculate_batch_metrics(
             # Cut metrics
             'cut_job_count': len(batch_cut),
             'cut_oee': cut_oee,
-            'cut_availability': cut_availability,
+            'cut_availability': cut_availability,  # From JobReports (primary metric)
+            'cut_operational_availability': cut_operational_availability if cut_operational_availability is not None else cut_availability,  # From equipment states (includes blocking)
             'cut_performance': cut_performance,
             'cut_quality': cut_quality,
             'cut_total_time_sec': cut_total_time,
+
+            # Cut constraint time breakdown (for analysis)
+            'cut_running_time_sec': cut_running_time_sec,
+            'cut_equipment_downtime_sec': cut_equipment_downtime_sec,
+            'cut_blocked_time_sec': cut_blocked_time_sec,
+            'cut_idle_other_sec': cut_idle_other_sec,
 
             # Pick metrics
             'pick_job_count': len(batch_pick),

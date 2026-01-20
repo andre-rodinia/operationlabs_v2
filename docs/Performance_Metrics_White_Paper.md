@@ -499,6 +499,61 @@ Constraint Analysis: 24.4% of time starved by upstream
   → Consider faster Cut or larger buffer
 ```
 
+#### Hybrid Approach for Cut Cell
+
+**Motivation:**
+
+Cut cell has two data sources for availability calculation:
+1. **JobReports**: Direct measurements from equipment (uptime_sec, downtime_sec)
+2. **Equipment States**: State transitions with descriptions (running, down, idle, blocked)
+
+To maintain consistency with existing OEE calculations while adding constraint analysis capabilities, we use a hybrid approach:
+
+**Primary OEE Calculation (Cut):**
+- Uses **JobReport availability** (existing methodology)
+- Formula: `uptime_sec / (uptime_sec + downtime_sec) × 100%`
+- Stored as: `cut_availability`
+- Used in: Batch OEE calculation (`cut_oee = cut_availability × cut_performance × cut_quality`)
+
+**Supplementary Constraint Analysis (Cut):**
+- Uses **Equipment States operational availability** (new capability)
+- Formula: `running_time_sec / (running_time_sec + downtime_sec + blocked_time_sec) × 100%`
+- Stored as: `cut_operational_availability`
+- Used in: UI constraint analysis, bottleneck identification
+
+**Why Hybrid?**
+
+1. **Consistency**: Maintains existing JobReport-based OEE calculations that stakeholders trust
+2. **Enhanced Insight**: Adds constraint analysis without disrupting primary metrics
+3. **Validation**: Two independent data sources cross-validate availability measurements
+4. **Flexibility**: Stakeholders see both equipment health and system effectiveness
+
+**Implementation:**
+
+```python
+# Cut OEE uses JobReport availability (primary metric)
+cut_availability = cut_uptime / (cut_uptime + cut_downtime) * 100
+
+# Cut operational metrics from equipment states (supplementary)
+cut_equipment_states = fetch_robot_equipment_states('Cut1', cut_start_ts, cut_end_ts)
+cut_operational_availability = cut_equipment_states['operational_availability']
+cut_blocked_time_sec = cut_equipment_states['blocked_time_sec']
+
+# Store both in batch metrics
+batch_metrics = {
+    'cut_availability': cut_availability,  # Used in OEE
+    'cut_operational_availability': cut_operational_availability,  # For analysis
+    'cut_blocked_time_sec': cut_blocked_time_sec  # For constraint breakdown
+}
+```
+
+**Pick Cell (No Hybrid):**
+
+Pick cell uses equipment states exclusively for both primary OEE and constraint analysis because:
+1. Pick JobReports don't contain uptime/downtime fields
+2. Equipment state data is the only source for Pick availability
+3. Consistency: Both equipment and operational availability come from same source
+
 ### 4.4 Performance Calculation
 
 **Print (Job-Level):**
