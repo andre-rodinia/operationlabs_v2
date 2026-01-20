@@ -412,33 +412,33 @@ if st.session_state.batches_df is not None and not st.session_state.batches_df.e
                     # IMPORTANT: Use the ORIGINAL batches_df from session state (with datetime objects),
                     # NOT the formatted batches_df copy (with string timestamps for display)
                     if st.session_state.batches_df is not None and not st.session_state.batches_df.empty and len(selected_batches) > 0:
-                        # Get the first selected batch row (assuming single batch analysis for now)
-                        batch_row = st.session_state.batches_df[st.session_state.batches_df['batch_id'].astype(str).isin([str(b) for b in selected_batches])].iloc[0]
+                        # Get ALL selected batch rows (supports multiple batch analysis)
+                        selected_batch_rows = st.session_state.batches_df[st.session_state.batches_df['batch_id'].astype(str).isin([str(b) for b in selected_batches])]
 
-                        # Extract timestamps (these are datetime objects, NOT strings)
+                        # Extract timestamps across ALL selected batches (find earliest start, latest end for each cell)
                         cell_timestamps = {
-                            'print_start': batch_row.get('print_start'),
-                            'print_end': batch_row.get('print_end'),
-                            'cut_start': batch_row.get('cut_start'),
-                            'cut_end': batch_row.get('cut_end'),
-                            'pick_start': batch_row.get('pick_start'),
-                            'pick_end': batch_row.get('pick_end')
+                            'print_start': selected_batch_rows['print_start'].min(),
+                            'print_end': selected_batch_rows['print_end'].max(),
+                            'cut_start': selected_batch_rows['cut_start'].min(),
+                            'cut_end': selected_batch_rows['cut_end'].max(),
+                            'pick_start': selected_batch_rows['pick_start'].min(),
+                            'pick_end': selected_batch_rows['pick_end'].max()
                         }
-                        
+
                         # Calculate system start (earliest) and end (latest)
                         starts = [cell_timestamps['print_start'], cell_timestamps['cut_start'], cell_timestamps['pick_start']]
                         ends = [cell_timestamps['print_end'], cell_timestamps['cut_end'], cell_timestamps['pick_end']]
-                        
+
                         starts = [s for s in starts if pd.notna(s)]
                         ends = [e for e in ends if pd.notna(e)]
-                        
+
                         if starts:
                             cell_timestamps['system_start'] = min(starts)
                         if ends:
                             cell_timestamps['system_end'] = max(ends)
-                        
+
                         st.session_state.cell_timestamps = cell_timestamps
-                        logger.info(f"Extracted cell timestamps: {cell_timestamps}")
+                        logger.info(f"Extracted cell timestamps for {len(selected_batch_rows)} batch(es): {cell_timestamps}")
 
                     st.success("✅ OEE calculation complete!")
 
