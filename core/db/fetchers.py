@@ -1831,42 +1831,14 @@ def fetch_print_jobreports(job_ids: List[str]) -> pd.DataFrame:
     if not job_ids:
         return pd.DataFrame()
 
-    # Pre-filter: Exclude job_ids that have ANY failed state
     try:
         with get_historian_connection() as conn:
             cursor = conn.cursor()
 
             placeholders = ','.join(['%s'] * len(job_ids))
-            failed_check_query = f"""
-                SELECT DISTINCT CAST(payload AS jsonb)->>'jobId' as job_id
-                FROM jobs
-                WHERE topic = %s
-                AND CAST(payload AS jsonb)->>'jobId' IN ({placeholders})
-                AND CAST(payload AS jsonb)->>'state' = 'failed'
-            """
 
-            cursor.execute(failed_check_query, [Config.TOPICS['print']] + job_ids)
-            failed_jobs = cursor.fetchall()
-            cursor.close()
-
-            if failed_jobs:
-                failed_job_ids = set(row[0] for row in failed_jobs if row[0])
-                logger.warning(f"Excluding {len(failed_job_ids)} failed Print jobs: {failed_job_ids}")
-                # Filter out failed jobs
-                job_ids = [jid for jid in job_ids if jid not in failed_job_ids]
-
-                if not job_ids:
-                    logger.warning("All Print jobs were failed, returning empty DataFrame")
-                    return pd.DataFrame()
-    except Exception as e:
-        logger.error(f"Error checking for failed Print jobs: {e}", exc_info=True)
-        # Continue with original job_ids if check fails
-
-    try:
-        with get_historian_connection() as conn:
-            cursor = conn.cursor()
-
-            placeholders = ','.join(['%s'] * len(job_ids))
+            # Fetch both completed AND failed jobs
+            # We need failed jobs to account for wasted time/materials in availability
             query = f"""
                 SELECT
                     CAST(payload AS jsonb)->>'jobId' as job_id,
@@ -1878,11 +1850,12 @@ def fetch_print_jobreports(job_ids: List[str]) -> pd.DataFrame:
                     CAST((CAST(payload AS jsonb)->'data'->'time'->>'downtime') AS FLOAT) as downtime_sec,
                     CAST((CAST(payload AS jsonb)->'data'->'reportData'->'printSettings'->>'speed') AS FLOAT) as speed_actual,
                     CAST((CAST(payload AS jsonb)->'data'->'reportData'->'printSettings'->>'nominalSpeed') AS FLOAT) as speed_nominal,
-                    CAST((CAST(payload AS jsonb)->'data'->'reportData'->'jobInfo'->>'area') AS FLOAT) as area_sqm
+                    CAST((CAST(payload AS jsonb)->'data'->'reportData'->'jobInfo'->>'area') AS FLOAT) as area_sqm,
+                    CAST(payload AS jsonb)->>'state' as job_state
                 FROM jobs
                 WHERE topic = %s
                 AND CAST(payload AS jsonb)->>'jobId' IN ({placeholders})
-                AND CAST(payload AS jsonb)->>'state' = 'completed'
+                AND CAST(payload AS jsonb)->>'state' IN ('completed', 'failed')
                 ORDER BY ts ASC
             """
 
@@ -1897,7 +1870,7 @@ def fetch_print_jobreports(job_ids: List[str]) -> pd.DataFrame:
         # Convert to DataFrame
         columns = [
             'job_id', 'batch_id', 'sheet_index', 'job_start', 'job_end',
-            'uptime_sec', 'downtime_sec', 'speed_actual', 'speed_nominal', 'area_sqm'
+            'uptime_sec', 'downtime_sec', 'speed_actual', 'speed_nominal', 'area_sqm', 'job_state'
         ]
         df = pd.DataFrame(records, columns=columns)
 
@@ -1925,13 +1898,23 @@ def fetch_print_jobreports(job_ids: List[str]) -> pd.DataFrame:
             0.0
         )
 
-        # Quality (initial 100% assumption)
-        df['quality'] = 100.0
+        # Quality - Failed jobs get 0% quality, completed jobs get 100% (will be overlaid with QC data later)
+        df['quality'] = np.where(
+            df['job_state'] == 'failed',
+            0.0,  # Failed jobs = 0% quality (total waste)
+            100.0  # Completed jobs = 100% (QC overlay will adjust this)
+        )
 
         # OEE
         df['oee'] = (df['availability'] * df['performance'] * df['quality']) / 10000
 
-        logger.info(f"Fetched {len(df)} Print JobReports")
+        # Log failed jobs
+        failed_jobs = df[df['job_state'] == 'failed']
+        if not failed_jobs.empty:
+            logger.warning(f"Found {len(failed_jobs)} failed Print jobs: {failed_jobs['job_id'].tolist()}")
+            logger.warning(f"  Failed jobs contributed {failed_jobs['total_time_sec'].sum():.1f}s of wasted production time")
+
+        logger.info(f"Fetched {len(df)} Print JobReports ({len(df[df['job_state']=='completed'])} completed, {len(failed_jobs)} failed)")
         return df
 
     except Exception as e:
@@ -1978,54 +1961,18 @@ def fetch_cut_jobreports(job_ids: List[str], print_df: pd.DataFrame = None, time
     if not job_ids:
         return pd.DataFrame()
 
-    # Pre-filter: Exclude job_ids that have ANY failed state
     try:
         with get_historian_connection() as conn:
             cursor = conn.cursor()
 
             placeholders = ','.join(['%s'] * len(job_ids))
-            failed_check_query = f"""
-                SELECT DISTINCT COALESCE(
-                    CAST(payload AS jsonb)->>'jobId',
-                    CAST(payload AS jsonb)->'data'->'ids'->>'jobId'
-                ) as job_id
-                FROM jobs
-                WHERE topic = %s
-                AND (
-                    CAST(payload AS jsonb)->>'jobId' IN ({placeholders})
-                    OR CAST(payload AS jsonb)->'data'->'ids'->>'jobId' IN ({placeholders})
-                )
-                AND CAST(payload AS jsonb)->>'state' = 'failed'
-            """
 
-            cursor.execute(failed_check_query, [Config.TOPICS['cut']] + list(job_ids) + list(job_ids))
-            failed_jobs = cursor.fetchall()
-            cursor.close()
-
-            if failed_jobs:
-                failed_job_ids = set(row[0] for row in failed_jobs if row[0])
-                logger.warning(f"Excluding {len(failed_job_ids)} failed Cut jobs: {failed_job_ids}")
-                # Filter out failed jobs
-                job_ids = [jid for jid in job_ids if jid not in failed_job_ids]
-
-                if not job_ids:
-                    logger.warning("All Cut jobs were failed, returning empty DataFrame")
-                    return pd.DataFrame()
-    except Exception as e:
-        logger.error(f"Error checking for failed Cut jobs: {e}", exc_info=True)
-        # Continue with original job_ids if check fails
-
-    try:
-        with get_historian_connection() as conn:
-            cursor = conn.cursor()
-
-            placeholders = ','.join(['%s'] * len(job_ids))
-            
             # Don't filter by time window - Cut might happen on different day than Print
             # We'll match by job_id + temporal proximity to Print jobs instead
             time_filter = ""
             query_params = [Config.TOPICS['cut']] + list(job_ids) + list(job_ids)
-            
+
+            # Fetch both completed AND failed jobs
             # Extract from Cut payload structure
             # jobId is in data.ids.jobId (also check top level as fallback)
             query = f"""
@@ -2047,7 +1994,7 @@ def fetch_cut_jobreports(job_ids: List[str], print_df: pd.DataFrame = None, time
                     CAST(payload AS jsonb)->>'jobId' IN ({placeholders})
                     OR CAST(payload AS jsonb)->'data'->'ids'->>'jobId' IN ({placeholders})
                 )
-                AND CAST(payload AS jsonb)->>'state' = 'completed'
+                AND CAST(payload AS jsonb)->>'state' IN ('completed', 'failed')
                 {time_filter}
                 ORDER BY ts DESC
             """
@@ -2239,13 +2186,26 @@ def fetch_cut_jobreports(job_ids: List[str], print_df: pd.DataFrame = None, time
         )
         # Performance is always 100% for Cut (no speed tracking)
         df['performance'] = 100.0
-        df['quality'] = 100.0
+
+        # Quality - Failed jobs get 0% quality, completed jobs get 100%
+        df['quality'] = np.where(
+            df['job_state'] == 'failed',
+            0.0,  # Failed jobs = 0% quality (total waste)
+            100.0  # Completed jobs = 100%
+        )
+
         df['oee'] = (df['availability'] * df['performance'] * df['quality']) / 10000
+
+        # Log failed jobs
+        failed_jobs = df[df['job_state'] == 'failed']
+        if not failed_jobs.empty:
+            logger.warning(f"Found {len(failed_jobs)} failed Cut jobs: {failed_jobs['job_id'].tolist()}")
+            logger.warning(f"  Failed jobs contributed {failed_jobs['total_time_sec'].sum():.1f}s of wasted production time")
 
         # Drop temporary column
         df = df.drop(columns=['report_timestamp'], errors='ignore')
 
-        logger.info(f"Fetched {len(df)} Cut JobReports (deduplicated, 1:1 with Print)")
+        logger.info(f"Fetched {len(df)} Cut JobReports (deduplicated, 1:1 with Print) ({len(df[df['job_state']=='completed'])} completed, {len(failed_jobs)} failed)")
         return df
 
     except Exception as e:
