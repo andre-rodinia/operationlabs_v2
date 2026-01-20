@@ -513,6 +513,30 @@ if st.session_state.print_df is not None:
 
     st.subheader("📦 Batch-Level OEE Metrics")
 
+    # Add explanation of system OEE approaches
+    with st.expander("ℹ️ Understanding System OEE Metrics"):
+        st.markdown("""
+        **System OEE** represents the overall equipment effectiveness of the entire production line (Print → Cut → Pick).
+
+        Two complementary approaches:
+
+        **1. System OEE (Combined)** - Multiplicative Approach:
+        - Formula: Print OEE × Cut OEE × Pick OEE
+        - Shows the **compounding effect** of inefficiencies across the serial process
+        - Example: 95% × 90% × 85% = 72.7%
+        - Use Case: Understanding cumulative impact of losses through the production chain
+
+        **2. System OEE (Bottleneck)** - Constraint-Based Approach:
+        - Formula: MIN(Print OEE, Cut OEE, Pick OEE)
+        - Shows the **constraint**: system can't go faster than the slowest cell
+        - Example: MIN(95%, 90%, 85%) = 85%
+        - Use Case: Identifying which cell is limiting overall system performance
+
+        **When to use each:**
+        - **Combined** shows realistic system output accounting for all losses
+        - **Bottleneck** shows where to focus improvement efforts
+        """)
+
     # Add custom CSS to increase font size in the dataframe
     st.markdown("""
         <style>
@@ -531,22 +555,24 @@ if st.session_state.print_df is not None:
         </style>
     """, unsafe_allow_html=True)
 
-    # Select columns for display, including actual performance
+    # Select columns for display, including system OEE and actual performance
     display_columns = [
         'batch_id',
+        'system_oee_combined', 'system_oee_bottleneck',
         'print_oee', 'print_availability', 'print_performance', 'print_performance_actual', 'print_quality',
         'cut_oee', 'cut_availability', 'cut_performance', 'cut_quality',
         'pick_oee', 'pick_availability', 'pick_performance', 'pick_quality'
     ]
-    
+
     # Filter to only include columns that exist in the DataFrame
     available_columns = [col for col in display_columns if col in batch_metrics_df.columns]
-    
+
     # Create a formatted copy for display with larger, more readable numbers
     display_df = batch_metrics_df[available_columns].copy()
-    
+
     # Format percentage columns to show 1 decimal place with % symbol
     percentage_columns = [
+        'system_oee_combined', 'system_oee_bottleneck',
         'print_oee', 'print_availability', 'print_performance', 'print_performance_actual', 'print_quality',
         'cut_oee', 'cut_availability', 'cut_performance', 'cut_quality',
         'pick_oee', 'pick_availability', 'pick_performance', 'pick_quality'
@@ -562,6 +588,8 @@ if st.session_state.print_df is not None:
         hide_index=True,
         column_config={
             "batch_id": st.column_config.NumberColumn("Batch ID", width="small"),
+            "system_oee_combined": st.column_config.TextColumn("System OEE (Combined)", width="medium"),
+            "system_oee_bottleneck": st.column_config.TextColumn("System OEE (Bottleneck)", width="medium"),
             "print_oee": st.column_config.TextColumn("Print OEE", width="medium"),
             "print_availability": st.column_config.TextColumn("Print Avail.", width="medium"),
             "print_performance": st.column_config.TextColumn("Print Perf. (Capped)", width="medium"),

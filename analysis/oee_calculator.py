@@ -383,9 +383,20 @@ def calculate_batch_metrics(
         print_oee = (print_availability / 100) * (print_performance / 100) * (print_quality / 100) * 100
         cut_oee = (cut_availability / 100) * (cut_performance / 100) * (cut_quality / 100) * 100
         pick_oee = (pick_availability / 100) * (pick_performance / 100) * (pick_quality / 100) * 100
-        
+
+        # Calculate System OEE (two approaches)
+        # 1. Combined (Multiplicative): Shows compounding effect of inefficiencies
+        system_oee_combined = (print_oee / 100) * (cut_oee / 100) * (pick_oee / 100) * 100
+
+        # 2. Bottleneck: System constrained by slowest cell
+        system_oee_bottleneck = min(print_oee, cut_oee, pick_oee)
+
         metrics = {
             'batch_id': batch_id,
+
+            # System-level OEE metrics
+            'system_oee_combined': system_oee_combined,  # Multiplicative approach
+            'system_oee_bottleneck': system_oee_bottleneck,  # Constraint-based approach
 
             # Print metrics
             'print_job_count': len(batch_print),
